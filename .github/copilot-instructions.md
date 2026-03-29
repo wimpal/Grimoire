@@ -31,3 +31,12 @@
 - **Privacy is the top priority.** Nothing leaves the machine. All file access is logged.
 - **Performance is second.** Keep everything lightweight. LLM only active when needed.
 - Refer to `.vscode/Guidelines/` for architecture, roadmap, and behaviour guidelines before suggesting approaches.
+
+## Styling
+- Full styling guide is in `.vscode/Guidelines/STYLING.md`. Read it before writing any UI code.
+- **No purples, no blues.** The accent colour is crimson. Obsidian uses purple — we do not.
+- All colours must use CSS variables from `src/app.css`. Never hardcode hex values in components.
+- Backgrounds are warm-tinted (parchment in light mode, near-black with warm undertones in dark mode).
+- No box shadows, no gradients, no border-radius above 6px, no decorative illustrations.
+- The note editor uses `--mono` font. All other UI chrome uses `--sans`.
+- Destructive actions (delete buttons) are hidden until row hover, then coloured `--danger` on their own hover.

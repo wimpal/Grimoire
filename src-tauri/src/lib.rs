@@ -1,3 +1,4 @@
+mod commands;
 mod db;
 
 use tauri::Manager;
@@ -24,6 +25,18 @@ pub fn run() {
 
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![
+            commands::create_note,
+            commands::get_note,
+            commands::list_notes,
+            commands::update_note,
+            commands::move_note,
+            commands::delete_note,
+            commands::create_folder,
+            commands::list_folders,
+            commands::rename_folder,
+            commands::delete_folder,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

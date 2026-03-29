@@ -1,89 +1,272 @@
 <script>
-  import svelteLogo from './assets/svelte.svg'
-  import viteLogo from './assets/vite.svg'
-  import heroImg from './assets/hero.png'
-  import Counter from './lib/Counter.svelte'
+  import { invoke } from '@tauri-apps/api/core';
+  import { onMount } from 'svelte';
+
+  // ── State ──────────────────────────────────────────────────────────────────
+
+  let folders = $state([]);
+  let notes = $state([]);
+  let selectedFolderId = $state(null); // null = "All notes"
+  let activeNote = $state(null);       // the note currently open in the editor
+
+  // Editor fields (kept in sync with activeNote)
+  let editorTitle = $state('');
+  let editorContent = $state('');
+  let isDirty = $state(false);
+
+  // Inline-creation inputs
+  let newFolderName = $state('');
+  let newNoteTitle = $state('');
+
+  // Error display
+  let errorMsg = $state('');
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  function showError(e) {
+    errorMsg = String(e);
+    setTimeout(() => (errorMsg = ''), 4000);
+  }
+
+  // ── Data loading ───────────────────────────────────────────────────────────
+
+  async function loadFolders() {
+    try {
+      folders = await invoke('list_folders');
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  async function loadNotes() {
+    try {
+      if (selectedFolderId === 'all') {
+        notes = await invoke('list_notes', { all: true });
+      } else {
+        // null means "unfiled", a number means a specific folder
+        notes = await invoke('list_notes', { folderId: selectedFolderId ?? null, all: false });
+      }
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  onMount(async () => {
+    await loadFolders();
+    await loadNotes();
+  });
+
+  // ── Folder actions ─────────────────────────────────────────────────────────
+
+  async function createFolder() {
+    const name = newFolderName.trim();
+    if (!name) return;
+    try {
+      await invoke('create_folder', { name, parentId: null });
+      newFolderName = '';
+      await loadFolders();
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  async function deleteFolder(id) {
+    if (!confirm('Delete this folder? Notes inside will become unfiled.')) return;
+    try {
+      await invoke('delete_folder', { id });
+      if (selectedFolderId === id) selectedFolderId = null;
+      await loadFolders();
+      await loadNotes();
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  async function selectFolder(id) {
+    selectedFolderId = id;
+    activeNote = null;
+    await loadNotes();
+  }
+
+  // ── Note actions ───────────────────────────────────────────────────────────
+
+  async function createNote() {
+    const title = newNoteTitle.trim() || 'Untitled';
+    try {
+      const note = await invoke('create_note', {
+        title,
+        folderId: selectedFolderId === 'all' ? null : (selectedFolderId ?? null),
+      });
+      newNoteTitle = '';
+      await loadNotes();
+      openNote(note);
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  function openNote(note) {
+    activeNote = note;
+    editorTitle = note.title;
+    editorContent = note.content;
+    isDirty = false;
+  }
+
+  function markDirty() {
+    isDirty = true;
+  }
+
+  async function saveNote() {
+    if (!activeNote) return;
+    try {
+      const updated = await invoke('update_note', {
+        id: activeNote.id,
+        title: editorTitle,
+        content: editorContent,
+      });
+      activeNote = updated;
+      isDirty = false;
+      await loadNotes(); // refresh the list so the title updates
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  async function deleteNote(id) {
+    if (!confirm('Delete this note?')) return;
+    try {
+      await invoke('delete_note', { id });
+      if (activeNote?.id === id) {
+        activeNote = null;
+        editorTitle = '';
+        editorContent = '';
+      }
+      await loadNotes();
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  async function moveNote(noteId, targetFolderId) {
+    try {
+      await invoke('move_note', { id: noteId, folderId: targetFolderId });
+      await loadNotes();
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  // Save on Ctrl+S
+  function handleKeydown(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      e.preventDefault();
+      saveNote();
+    }
+  }
 </script>
 
-<section id="center">
-  <div class="hero">
-    <img src={heroImg} class="base" width="170" height="179" alt="" />
-    <img src={svelteLogo} class="framework" alt="Svelte logo" />
-    <img src={viteLogo} class="vite" alt="Vite logo" />
-  </div>
-  <div>
-    <h1>Get started</h1>
-    <p>Edit <code>src/App.svelte</code> and save to test <code>HMR</code></p>
-  </div>
-  <Counter />
-</section>
+<svelte:window onkeydown={handleKeydown} />
 
-<div class="ticks"></div>
+{#if errorMsg}
+  <div class="error-banner">{errorMsg}</div>
+{/if}
 
-<section id="next-steps">
-  <div id="docs">
-    <svg class="icon" role="presentation" aria-hidden="true">
-      <use href="/icons.svg#documentation-icon"></use>
-    </svg>
-    <h2>Documentation</h2>
-    <p>Your questions, answered</p>
-    <ul>
-      <li>
-        <a href="https://vite.dev/" target="_blank" rel="noreferrer">
-          <img class="logo" src={viteLogo} alt="" />
-          Explore Vite
-        </a>
+<div class="layout">
+  <!-- ── Sidebar: Folders ──────────────────────────────────────────── -->
+  <aside class="sidebar">
+    <h2>Folders</h2>
+
+    <ul class="folder-list">
+      <li class:active={selectedFolderId === 'all'}>
+        <button class="row-btn" onclick={() => selectFolder('all')}>All Notes</button>
       </li>
-      <li>
-        <a href="https://svelte.dev/" target="_blank" rel="noreferrer">
-          <img class="button-icon" src={svelteLogo} alt="" />
-          Learn more
-        </a>
+      <li class:active={selectedFolderId === null}>
+        <button class="row-btn" onclick={() => selectFolder(null)}>Unfiled</button>
       </li>
+      {#each folders as folder (folder.id)}
+        <li class:active={selectedFolderId === folder.id}>
+          <button class="row-btn folder-name" onclick={() => selectFolder(folder.id)}>{folder.name}</button>
+          <button class="icon-btn danger" onclick={() => deleteFolder(folder.id)} title="Delete folder">✕</button>
+        </li>
+      {/each}
     </ul>
-  </div>
-  <div id="social">
-    <svg class="icon" role="presentation" aria-hidden="true">
-      <use href="/icons.svg#social-icon"></use>
-    </svg>
-    <h2>Connect with us</h2>
-    <p>Join the Vite community</p>
-    <ul>
-      <li>
-        <a href="https://github.com/vitejs/vite" target="_blank" rel="noreferrer">
-          <svg class="button-icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#github-icon"></use>
-          </svg>
-          GitHub
-        </a>
-      </li>
-      <li>
-        <a href="https://chat.vite.dev/" target="_blank" rel="noreferrer">
-          <svg class="button-icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#discord-icon"></use>
-          </svg>
-          Discord
-        </a>
-      </li>
-      <li>
-        <a href="https://x.com/vite_js" target="_blank" rel="noreferrer">
-          <svg class="button-icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#x-icon"></use>
-          </svg>
-          X.com
-        </a>
-      </li>
-      <li>
-        <a href="https://bsky.app/profile/vite.dev" target="_blank" rel="noreferrer">
-          <svg class="button-icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#bluesky-icon"></use>
-          </svg>
-          Bluesky
-        </a>
-      </li>
-    </ul>
-  </div>
-</section>
 
-<div class="ticks"></div>
-<section id="spacer"></section>
+    <div class="new-item-row">
+      <input
+        bind:value={newFolderName}
+        placeholder="New folder…"
+        onkeydown={(e) => e.key === 'Enter' && createFolder()}
+      />
+      <button onclick={createFolder}>+</button>
+    </div>
+  </aside>
+
+  <!-- ── Note list ─────────────────────────────────────────────────── -->
+  <div class="note-list">
+    <h2>
+      {#if selectedFolderId === 'all'}All Notes
+      {:else if selectedFolderId === null}Unfiled
+      {:else}{folders.find(f => f.id === selectedFolderId)?.name ?? ''}
+      {/if}
+    </h2>
+
+    <ul>
+      {#each notes as note (note.id)}
+        <li class:active={activeNote?.id === note.id}>
+          <button class="row-btn note-title" onclick={() => openNote(note)}>{note.title}</button>
+          <button class="icon-btn danger" onclick={() => deleteNote(note.id)} title="Delete note">✕</button>
+        </li>
+      {:else}
+        <li class="empty">No notes here</li>
+      {/each}
+    </ul>
+
+    <div class="new-item-row">
+      <input
+        bind:value={newNoteTitle}
+        placeholder="New note…"
+        onkeydown={(e) => e.key === 'Enter' && createNote()}
+      />
+      <button onclick={createNote}>+</button>
+    </div>
+  </div>
+
+  <!-- ── Editor ────────────────────────────────────────────────────── -->
+  <main class="editor">
+    {#if activeNote}
+      <div class="editor-toolbar">
+        <input
+          class="title-input"
+          bind:value={editorTitle}
+          oninput={markDirty}
+          placeholder="Note title"
+        />
+        <div class="toolbar-actions">
+          <label>
+            Move to:
+            <select
+              onchange={(e) => { const v = /** @type {HTMLSelectElement} */ (e.target).value; moveNote(activeNote.id, v === 'null' ? null : Number(v)); }}
+            >
+              <option value="null">Unfiled</option>
+              {#each folders as f (f.id)}
+                <option value={f.id} selected={activeNote.folder_id === f.id}>{f.name}</option>
+              {/each}
+            </select>
+          </label>
+          <button onclick={saveNote} disabled={!isDirty}>
+            {isDirty ? 'Save (Ctrl+S)' : 'Saved'}
+          </button>
+        </div>
+      </div>
+      <textarea
+        class="content-area"
+        bind:value={editorContent}
+        oninput={markDirty}
+        placeholder="Write your note…"
+      ></textarea>
+    {:else}
+      <div class="empty-editor">Select or create a note</div>
+    {/if}
+  </main>
+</div>
+
