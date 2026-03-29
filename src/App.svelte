@@ -1,6 +1,7 @@
 <script>
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
+  import Chat from './lib/Chat.svelte';
 
   // ── State ──────────────────────────────────────────────────────────────────
 
@@ -20,6 +21,27 @@
 
   // Error display
   let errorMsg = $state('');
+
+  // Chat panel
+  let chatOpen = $state(false);
+
+  // Seed state
+  let isSeeding = $state(false);
+
+  // Sidebar collapse state
+  let foldersOpen = $state(true);
+  let notesOpen = $state(true);
+
+  // Compute grid column widths reactively from all panel states.
+  // $derived re-evaluates automatically whenever any of its dependencies change.
+  let gridCols = $derived(
+    [
+      foldersOpen ? '200px' : '28px',
+      notesOpen ? '240px' : '28px',
+      '1fr',
+      ...(chatOpen ? ['360px'] : []),
+    ].join(' ')
+  );
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -100,6 +122,8 @@
       newNoteTitle = '';
       await loadNotes();
       openNote(note);
+      // Index in the background — don't block the UI.
+      invoke('index_note', { noteId: note.id, title: note.title, content: '' }).catch(() => {});
     } catch (e) {
       showError(e);
     }
@@ -127,6 +151,7 @@
       activeNote = updated;
       isDirty = false;
       await loadNotes(); // refresh the list so the title updates
+      invoke('index_note', { noteId: updated.id, title: editorTitle, content: editorContent }).catch(() => {});
     } catch (e) {
       showError(e);
     }
@@ -142,6 +167,7 @@
         editorContent = '';
       }
       await loadNotes();
+      invoke('remove_note_index', { noteId: id }).catch(() => {});
     } catch (e) {
       showError(e);
     }
@@ -163,6 +189,19 @@
       saveNote();
     }
   }
+
+  async function seedNotes() {
+    isSeeding = true;
+    try {
+      const n = await invoke('seed_notes');
+      await loadNotes();
+      showError(`✓ Seeded ${n} notes and indexed them.`);
+    } catch (e) {
+      showError(e);
+    } finally {
+      isSeeding = false;
+    }
+  }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -171,68 +210,95 @@
   <div class="error-banner">{errorMsg}</div>
 {/if}
 
-<div class="layout">
+<div class="layout" style:grid-template-columns={gridCols}>
   <!-- ── Sidebar: Folders ──────────────────────────────────────────── -->
-  <aside class="sidebar">
-    <h2>Folders</h2>
+  <aside class="sidebar" class:collapsed={!foldersOpen}>
+    {#if foldersOpen}
+      <div class="panel-header">
+        <h2>Folders</h2>
+        <button class="collapse-btn" onclick={() => (foldersOpen = false)} title="Collapse">‹</button>
+      </div>
 
-    <ul class="folder-list">
-      <li class:active={selectedFolderId === 'all'}>
-        <button class="row-btn" onclick={() => selectFolder('all')}>All Notes</button>
-      </li>
-      <li class:active={selectedFolderId === null}>
-        <button class="row-btn" onclick={() => selectFolder(null)}>Unfiled</button>
-      </li>
-      {#each folders as folder (folder.id)}
-        <li class:active={selectedFolderId === folder.id}>
-          <button class="row-btn folder-name" onclick={() => selectFolder(folder.id)}>{folder.name}</button>
-          <button class="icon-btn danger" onclick={() => deleteFolder(folder.id)} title="Delete folder">✕</button>
+      <ul class="folder-list">
+        <li class:active={selectedFolderId === 'all'}>
+          <button class="row-btn" onclick={() => selectFolder('all')}>All Notes</button>
         </li>
-      {/each}
-    </ul>
+        <li class:active={selectedFolderId === null}>
+          <button class="row-btn" onclick={() => selectFolder(null)}>Unfiled</button>
+        </li>
+        {#each folders as folder (folder.id)}
+          <li class:active={selectedFolderId === folder.id}>
+            <button class="row-btn folder-name" onclick={() => selectFolder(folder.id)}>{folder.name}</button>
+            <button class="icon-btn danger" onclick={() => deleteFolder(folder.id)} title="Delete folder">✕</button>
+          </li>
+        {/each}
+      </ul>
 
-    <div class="new-item-row">
-      <input
-        bind:value={newFolderName}
-        placeholder="New folder…"
-        onkeydown={(e) => e.key === 'Enter' && createFolder()}
-      />
-      <button onclick={createFolder}>+</button>
-    </div>
+      <div class="new-item-row">
+        <input
+          bind:value={newFolderName}
+          placeholder="New folder…"
+          onkeydown={(e) => e.key === 'Enter' && createFolder()}
+        />
+        <button onclick={createFolder}>+</button>
+      </div>
+    {:else}
+      <button class="collapsed-strip" onclick={() => (foldersOpen = true)} title="Expand folders">
+        <span>Folders</span>
+      </button>
+    {/if}
   </aside>
 
   <!-- ── Note list ─────────────────────────────────────────────────── -->
-  <div class="note-list">
-    <h2>
-      {#if selectedFolderId === 'all'}All Notes
-      {:else if selectedFolderId === null}Unfiled
-      {:else}{folders.find(f => f.id === selectedFolderId)?.name ?? ''}
+  <div class="note-list" class:collapsed={!notesOpen}>
+    {#if notesOpen}
+      <div class="panel-header">
+        <h2>
+          {#if selectedFolderId === 'all'}All Notes
+          {:else if selectedFolderId === null}Unfiled
+          {:else}{folders.find(f => f.id === selectedFolderId)?.name ?? ''}
+          {/if}
+        </h2>
+        <button class="collapse-btn" onclick={() => (notesOpen = false)} title="Collapse">‹</button>
+      </div>
+
+      <ul>
+        {#each notes as note (note.id)}
+          <li class:active={activeNote?.id === note.id}>
+            <button class="row-btn note-title" onclick={() => openNote(note)}>{note.title}</button>
+            <button class="icon-btn danger" onclick={() => deleteNote(note.id)} title="Delete note">✕</button>
+          </li>
+        {:else}
+          <li class="empty">No notes here</li>
+        {/each}
+      </ul>
+
+      <div class="new-item-row">
+        <input
+          bind:value={newNoteTitle}
+          placeholder="New note…"
+          onkeydown={(e) => e.key === 'Enter' && createNote()}
+        />
+        <button onclick={createNote}>+</button>
+      </div>
+
+      {#if notes.length === 0}
+        <button class="seed-btn" onclick={seedNotes} disabled={isSeeding}>
+          {isSeeding ? 'Seeding…' : 'Seed test notes'}
+        </button>
       {/if}
-    </h2>
-
-    <ul>
-      {#each notes as note (note.id)}
-        <li class:active={activeNote?.id === note.id}>
-          <button class="row-btn note-title" onclick={() => openNote(note)}>{note.title}</button>
-          <button class="icon-btn danger" onclick={() => deleteNote(note.id)} title="Delete note">✕</button>
-        </li>
-      {:else}
-        <li class="empty">No notes here</li>
-      {/each}
-    </ul>
-
-    <div class="new-item-row">
-      <input
-        bind:value={newNoteTitle}
-        placeholder="New note…"
-        onkeydown={(e) => e.key === 'Enter' && createNote()}
-      />
-      <button onclick={createNote}>+</button>
-    </div>
+    {:else}
+      <button class="collapsed-strip" onclick={() => (notesOpen = true)} title="Expand notes">
+        <span>Notes</span>
+      </button>
+    {/if}
   </div>
 
   <!-- ── Editor ────────────────────────────────────────────────────── -->
   <main class="editor">
+    <button class="chat-toggle" onclick={() => (chatOpen = !chatOpen)}>
+      {chatOpen ? '✕ Chat' : 'Chat'}
+    </button>
     {#if activeNote}
       <div class="editor-toolbar">
         <input
@@ -268,5 +334,9 @@
       <div class="empty-editor">Select or create a note</div>
     {/if}
   </main>
+
+  {#if chatOpen}
+    <Chat />
+  {/if}
 </div>
 

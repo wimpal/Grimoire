@@ -1,5 +1,6 @@
 mod commands;
 mod db;
+mod vector;
 
 use tauri::Manager;
 
@@ -21,6 +22,11 @@ pub fn run() {
                     .await
                     .expect("failed to initialise database");
                 app_handle.manage(pool);
+
+                let vdb = vector::init(&app_handle)
+                    .await
+                    .expect("failed to initialise vector database");
+                app_handle.manage(vector::VectorDb(vdb));
             });
 
             Ok(())
@@ -36,6 +42,11 @@ pub fn run() {
             commands::list_folders,
             commands::rename_folder,
             commands::delete_folder,
+            commands::chat,
+            commands::index_note,
+            commands::remove_note_index,
+            commands::search_notes,
+            commands::seed_notes,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
