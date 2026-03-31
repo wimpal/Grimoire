@@ -28,6 +28,28 @@ pub struct Folder {
     pub created_at: i64,
 }
 
+/// A minimal note reference used for tag/link results — just enough to render
+/// a clickable pill in the UI without transferring full note content.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct LinkedNote {
+    pub id: i64,
+    pub title: String,
+}
+
+/// A node in the graph: a note with its id and title.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct GraphNode {
+    pub id: i64,
+    pub title: String,
+}
+
+/// A directed edge between two notes.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct GraphEdge {
+    pub source: i64,
+    pub target: i64,
+}
+
 // ---------------------------------------------------------------------------
 // Note commands
 // ---------------------------------------------------------------------------
@@ -246,6 +268,25 @@ struct OllamaChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
     stream: bool,
+    options: OllamaOptions,
+}
+
+/// Runtime options forwarded to Ollama on every request.
+/// `num_thread` caps the number of CPU threads Ollama uses for inference,
+/// leaving headroom for the OS and other running applications.
+#[derive(Serialize)]
+struct OllamaOptions {
+    num_thread: usize,
+}
+
+impl OllamaOptions {
+    fn balanced() -> Self {
+        let total = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        // Use at most half the logical cores, but always at least 1.
+        Self { num_thread: (total / 2).max(1) }
+    }
 }
 
 /// The response body from Ollama. Only the `message` field is needed.
@@ -265,6 +306,7 @@ pub async fn chat(model: String, messages: Vec<ChatMessage>) -> Result<String, S
         model,
         messages,
         stream: false,
+        options: OllamaOptions::balanced(),
     };
 
     let response = client
@@ -290,8 +332,104 @@ pub async fn chat(model: String, messages: Vec<ChatMessage>) -> Result<String, S
 // choice for Ollama: 274 MB, 768-dimensional vectors, purpose-built for text.
 const EMBED_MODEL: &str = "nomic-embed-text";
 
+/// Split a long line into smaller pieces at sentence-ending punctuation.
+/// Only splits where `. `, `! `, or `? ` is followed by an uppercase letter,
+/// which avoids false splits on abbreviations like "e.g. " or "TLS 1.3 ".
+fn split_at_punctuation(text: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    let chars: Vec<char> = text.chars().collect();
+
+    for (i, &ch) in chars.iter().enumerate() {
+        buf.push(ch);
+        if matches!(ch, '.' | '!' | '?') {
+            // Peek two chars ahead: space then uppercase → real sentence boundary.
+            let next = chars.get(i + 1).copied();
+            let after = chars.get(i + 2).copied();
+            if matches!(next, Some(' ') | Some('\t'))
+                && matches!(after, Some(c) if c.is_uppercase())
+            {
+                let s = buf.trim().to_string();
+                if !s.is_empty() {
+                    parts.push(s);
+                }
+                buf.clear();
+            }
+        }
+    }
+
+    let tail = buf.trim().to_string();
+    if !tail.is_empty() {
+        parts.push(tail);
+    }
+    if parts.is_empty() {
+        parts.push(text.trim().to_string());
+    }
+    parts
+}
+
+/// Split `text` into individual sentences.
+/// First splits on newlines (one idea per line is common in notes), then
+/// further splits long lines at sentence-ending punctuation.
+fn split_sentences(text: &str) -> Vec<String> {
+    let mut sentences: Vec<String> = Vec::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Only try punctuation-splitting for lines longer than 30 words;
+        // short lines are already a single thought.
+        if line.split_whitespace().count() > 30 {
+            sentences.extend(split_at_punctuation(line));
+        } else {
+            sentences.push(line.to_string());
+        }
+    }
+
+    if sentences.is_empty() {
+        // Fallback: treat the whole text as one chunk.
+        let s = text.trim().to_string();
+        if !s.is_empty() {
+            sentences.push(s);
+        }
+    }
+    sentences
+}
+
+/// Group a flat list of sentences into overlapping chunks.
+/// `per_chunk` is the number of sentences per chunk; `overlap` is how many
+/// sentences the next chunk re-uses from the end of the previous one.
+/// This keeps sentence boundaries intact while giving neighbouring chunks
+/// shared context for better retrieval continuity.
+fn chunk_sentences(sentences: Vec<String>, per_chunk: usize, overlap: usize) -> Vec<String> {
+    if sentences.is_empty() {
+        return vec![String::new()];
+    }
+    if sentences.len() <= per_chunk {
+        return vec![sentences.join(" ")];
+    }
+    let step = per_chunk.saturating_sub(overlap).max(1);
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    loop {
+        let end = (start + per_chunk).min(sentences.len());
+        chunks.push(sentences[start..end].join(" "));
+        if end == sentences.len() {
+            break;
+        }
+        start += step;
+    }
+    chunks
+}
+
 /// Embed a note and store it in the vector index.
-/// Called fire-and-forget from the frontend after every save/create.
+/// The note content is split into sentences, then grouped into overlapping
+/// 3-sentence chunks. Each chunk is embedded on its own content alone —
+/// the title is intentionally excluded from the embedding so that off-topic
+/// sentences in a note (e.g. a random thought at the end of a technical note)
+/// still produce vectors that match unrelated queries.
 #[tauri::command]
 pub async fn index_note(
     vdb: State<'_, crate::vector::VectorDb>,
@@ -299,10 +437,16 @@ pub async fn index_note(
     title: String,
     content: String,
 ) -> Result<(), String> {
-    // Embed title + content together so search matches on either.
-    let text = format!("{title}\n\n{content}");
-    let embedding = crate::vector::embed(&text, EMBED_MODEL).await?;
-    crate::vector::upsert(&vdb.0, note_id, &title, &content, embedding).await
+    let sentences = split_sentences(&content);
+    let raw_chunks = chunk_sentences(sentences, 1, 0);
+
+    let mut chunks: Vec<(i32, String, Vec<f32>)> = Vec::new();
+    for (i, chunk_text) in raw_chunks.into_iter().enumerate() {
+        let embedding = crate::vector::embed(&chunk_text, EMBED_MODEL).await?;
+        chunks.push((i as i32, chunk_text, embedding));
+    }
+
+    crate::vector::upsert(&vdb.0, note_id, &title, chunks).await
 }
 
 /// Remove a note from the vector index. Called when a note is deleted.
@@ -323,12 +467,328 @@ pub async fn search_notes(
     limit: Option<usize>,
 ) -> Result<Vec<crate::vector::NoteMatch>, String> {
     let embedding = crate::vector::embed(&query, EMBED_MODEL).await?;
-    crate::vector::search(&vdb.0, embedding, limit.unwrap_or(3)).await
+    crate::vector::search(&vdb.0, embedding, limit.unwrap_or(10)).await
+}
+
+/// Re-index every note currently in SQLite into LanceDB from scratch.
+/// Useful after schema migrations, accidental index loss, or any time SQLite
+/// and LanceDB have drifted out of sync. Existing index entries are replaced.
+/// Returns the number of notes indexed.
+#[tauri::command]
+pub async fn reindex_all(
+    pool: State<'_, SqlitePool>,
+    vdb: State<'_, crate::vector::VectorDb>,
+) -> Result<usize, String> {
+    let notes = sqlx::query_as::<_, Note>(
+        "SELECT id, title, content, folder_id, created_at, updated_at FROM notes",
+    )
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    for note in &notes {
+        let sentences = split_sentences(&note.content);
+        let raw_chunks = chunk_sentences(sentences, 1, 0);
+        let mut chunks: Vec<(i32, String, Vec<f32>)> = Vec::new();
+        for (i, chunk_text) in raw_chunks.into_iter().enumerate() {
+            let embedding = crate::vector::embed(&chunk_text, EMBED_MODEL).await?;
+            chunks.push((i as i32, chunk_text, embedding));
+        }
+        crate::vector::upsert(&vdb.0, note.id, &note.title, chunks).await?;
+    }
+
+    Ok(notes.len())
+}
+
+// ---------------------------------------------------------------------------
+// Tags and wiki-links
+// ---------------------------------------------------------------------------
+
+/// Extract `#tag` mentions from note content.
+/// A tag is `#` immediately followed by one or more word characters (letters,
+/// digits, `-`, `_`), and must be preceded by whitespace or start-of-text so
+/// that URLs like `https://example.com/#section` are not treated as tags.
+fn parse_tags(content: &str) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
+    let chars: Vec<char> = content.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '#' {
+            let preceded_ok = i == 0 || chars[i - 1].is_whitespace();
+            let followed_ok = chars
+                .get(i + 1)
+                .map(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                .unwrap_or(false);
+            if preceded_ok && followed_ok {
+                let start = i + 1;
+                let mut end = start;
+                while end < chars.len()
+                    && (chars[end].is_alphanumeric() || chars[end] == '_' || chars[end] == '-')
+                {
+                    end += 1;
+                }
+                let tag: String = chars[start..end].iter().collect::<String>().to_lowercase();
+                if !tags.contains(&tag) {
+                    tags.push(tag);
+                }
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    tags
+}
+
+/// Extract `[[note title]]` wiki-link targets from note content.
+fn parse_wiki_links(content: &str) -> Vec<String> {
+    let mut links: Vec<String> = Vec::new();
+    let mut rest = content;
+    while let Some(open) = rest.find("[[") {
+        rest = &rest[open + 2..];
+        if let Some(close) = rest.find("]]") {
+            let title = rest[..close].trim().to_string();
+            if !title.is_empty() && !links.contains(&title) {
+                links.push(title);
+            }
+            rest = &rest[close + 2..];
+        } else {
+            break;
+        }
+    }
+    links
+}
+
+/// Persist the parsed tags for a note. Replaces all existing note→tag rows,
+/// but leaves the `tags` table rows in place (tags are shared across notes).
+async fn sync_tags(pool: &SqlitePool, note_id: i64, tags: &[String]) -> Result<(), String> {
+    sqlx::query("DELETE FROM note_tags WHERE note_id = ?")
+        .bind(note_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    for tag in tags {
+        // Ensure the tag name exists in the tags table.
+        sqlx::query("INSERT OR IGNORE INTO tags (name) VALUES (?)")
+            .bind(tag)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let tag_id: i64 = sqlx::query_scalar("SELECT id FROM tags WHERE name = ?")
+            .bind(tag)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        sqlx::query("INSERT OR IGNORE INTO note_tags (note_id, tag_id) VALUES (?, ?)")
+            .bind(note_id)
+            .bind(tag_id)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Persist the parsed wiki-links for a note. Replaces all existing outgoing
+/// links. Link targets that don't match an existing note title are silently
+/// skipped — they'll be picked up on the next save if the target is created.
+async fn sync_links(
+    pool: &SqlitePool,
+    note_id: i64,
+    link_titles: &[String],
+) -> Result<(), String> {
+    sqlx::query("DELETE FROM note_links WHERE source_id = ?")
+        .bind(note_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    for title in link_titles {
+        let target: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM notes WHERE title = ? LIMIT 1")
+                .bind(title)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+
+        if let Some(target_id) = target {
+            if target_id != note_id {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO note_links (source_id, target_id) VALUES (?, ?)",
+                )
+                .bind(note_id)
+                .bind(target_id)
+                .execute(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Return all tags with a count of how many notes use each one, sorted by
+/// name. Used by the sidebar tag browser.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct TagCount {
+    pub name: String,
+    pub count: i64,
+}
+
+#[tauri::command]
+pub async fn list_all_tags(
+    pool: State<'_, SqlitePool>,
+) -> Result<Vec<TagCount>, String> {
+    let tags = sqlx::query_as::<_, TagCount>(
+        "SELECT t.name, COUNT(nt.note_id) AS count
+         FROM tags t
+         JOIN note_tags nt ON nt.tag_id = t.id
+         GROUP BY t.id
+         ORDER BY t.name ASC",
+    )
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(tags)
+}
+
+/// Return all notes and all wiki-links as a graph dataset.
+/// The frontend uses this to build a force-directed graph.
+#[tauri::command]
+pub async fn get_graph_data(
+    pool: State<'_, SqlitePool>,
+) -> Result<(Vec<GraphNode>, Vec<GraphEdge>), String> {
+    let nodes = sqlx::query_as::<_, GraphNode>(
+        "SELECT id, title FROM notes ORDER BY id ASC",
+    )
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let edges = sqlx::query_as::<_, GraphEdge>(
+        "SELECT source_id AS source, target_id AS target FROM note_links",
+    )
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok((nodes, edges))
+}
+
+/// Parse and persist all `#tags` and `[[wiki-links]]` found in a note's content.
+/// Called in the background after every save. Failures are non-fatal — the
+/// relations are derived data and can always be recomputed from content.
+#[tauri::command]
+pub async fn sync_note_relations(
+    pool: State<'_, SqlitePool>,
+    note_id: i64,
+    content: String,
+) -> Result<(), String> {
+    let tags = parse_tags(&content);
+    let links = parse_wiki_links(&content);
+    sync_tags(pool.inner(), note_id, &tags).await?;
+    sync_links(pool.inner(), note_id, &links).await?;
+    Ok(())
+}
+
+/// Return the tag names attached to a note, alphabetically sorted.
+#[tauri::command]
+pub async fn get_note_tags(
+    pool: State<'_, SqlitePool>,
+    note_id: i64,
+) -> Result<Vec<String>, String> {
+    let tags: Vec<String> = sqlx::query_scalar(
+        "SELECT t.name FROM tags t
+         JOIN note_tags nt ON nt.tag_id = t.id
+         WHERE nt.note_id = ?
+         ORDER BY t.name ASC",
+    )
+    .bind(note_id)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(tags)
+}
+
+/// Return notes that this note links to via `[[title]]`, alphabetically sorted.
+#[tauri::command]
+pub async fn get_note_links(
+    pool: State<'_, SqlitePool>,
+    note_id: i64,
+) -> Result<Vec<LinkedNote>, String> {
+    let links = sqlx::query_as::<_, LinkedNote>(
+        "SELECT n.id, n.title FROM notes n
+         JOIN note_links nl ON nl.target_id = n.id
+         WHERE nl.source_id = ?
+         ORDER BY n.title ASC",
+    )
+    .bind(note_id)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(links)
+}
+
+/// Return notes that link to this note via `[[title]]` (backlinks), alphabetically sorted.
+#[tauri::command]
+pub async fn get_backlinks(
+    pool: State<'_, SqlitePool>,
+    note_id: i64,
+) -> Result<Vec<LinkedNote>, String> {
+    let links = sqlx::query_as::<_, LinkedNote>(
+        "SELECT n.id, n.title FROM notes n
+         JOIN note_links nl ON nl.source_id = n.id
+         WHERE nl.target_id = ?
+         ORDER BY n.title ASC",
+    )
+    .bind(note_id)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(links)
+}
+
+/// List all notes that carry a given tag, sorted by most recently updated.
+#[tauri::command]
+pub async fn list_notes_by_tag(
+    pool: State<'_, SqlitePool>,
+    tag: String,
+) -> Result<Vec<Note>, String> {
+    let notes = sqlx::query_as::<_, Note>(
+        "SELECT n.id, n.title, n.content, n.folder_id, n.created_at, n.updated_at
+         FROM notes n
+         JOIN note_tags nt ON nt.note_id = n.id
+         JOIN tags t ON t.id = nt.tag_id
+         WHERE t.name = ?
+         ORDER BY n.updated_at DESC",
+    )
+    .bind(tag.to_lowercase())
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(notes)
+}
+
+/// Debug command: returns the top 10 vector search hits with raw distance scores.
+/// Use this from the UI to calibrate MAX_DISTANCE — look at the distance values
+/// for chunks you consider relevant vs. irrelevant, then set the threshold between them.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn debug_search(
+    vdb: State<'_, crate::vector::VectorDb>,
+    query: String,
+) -> Result<Vec<crate::vector::RawMatch>, String> {
+    let embedding = crate::vector::embed(&query, EMBED_MODEL).await?;
+    crate::vector::raw_search(&vdb.0, embedding, 10).await
 }
 
 /// Insert a set of varied seed notes and index them all.
 /// Returns the number of notes created. Intended for development/testing only
 /// — the button that calls this should only appear in debug builds.
+#[cfg(debug_assertions)]
 #[tauri::command]
 pub async fn seed_notes(
     pool: State<'_, SqlitePool>,
@@ -431,10 +891,15 @@ pub async fn seed_notes(
         .await
         .map_err(|e| e.to_string())?;
 
-        // Index into LanceDB (embed title + content together).
-        let text = format!("{}\n\n{}", row.title, row.content);
-        let embedding = crate::vector::embed(&text, EMBED_MODEL).await?;
-        crate::vector::upsert(&vdb.0, row.id, &row.title, &row.content, embedding).await?;
+        // Index into LanceDB using the same sentence-chunking path as index_note.
+        let sentences = split_sentences(&row.content);
+        let raw_chunks = chunk_sentences(sentences, 1, 0);
+        let mut chunks: Vec<(i32, String, Vec<f32>)> = Vec::new();
+        for (i, chunk_text) in raw_chunks.into_iter().enumerate() {
+            let embedding = crate::vector::embed(&chunk_text, EMBED_MODEL).await?;
+            chunks.push((i as i32, chunk_text, embedding));
+        }
+        crate::vector::upsert(&vdb.0, row.id, &row.title, chunks).await?;
 
         count += 1;
     }

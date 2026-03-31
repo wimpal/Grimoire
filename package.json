@@ -16,6 +16,7 @@
     "vite": "^8.0.1"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.10.1"
+    "@tauri-apps/api": "^2.10.1",
+    "d3-force": "^3.0.0"
   }
 }

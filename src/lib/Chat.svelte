@@ -9,7 +9,12 @@
   let model = $state('llama3.2');
   let isLoading = $state(false);
   let error = $state('');
-  let useNotes = $state(false);
+  let useNotes = $state(true);
+
+  // Titles of notes injected as context for the most recent message.
+  // Empty when notes search is off, failed, or returned nothing.
+  let sourcesUsed = $state([]);
+  let notesError = $state('');
 
   // Reference to the scrollable messages container so we can auto-scroll.
   let messagesEl = $state(null);
@@ -34,6 +39,8 @@
     input = '';
     isLoading = true;
     error = '';
+    sourcesUsed = [];
+    notesError = '';
 
     try {
       // When useNotes is on, search the vector index and inject relevant notes
@@ -41,14 +48,37 @@
       // messages array — it's injected per-send so it doesn't grow the history.
       let payload = updated;
       if (useNotes) {
-        const matches = await invoke('search_notes', { query: text, limit: 3 }).catch(() => []);
+        let matches = [];
+        try {
+          matches = await invoke('search_notes', { query: text });
+        } catch (e) {
+          // Surface the error so the user knows RAG isn't working rather than
+          // silently falling back to the model's generic training data.
+          notesError = `Note search failed: ${e}`;
+        }
         if (matches.length > 0) {
-          const context = matches
-            .map(m => `### ${m.title}\n${m.excerpt}`)
+          // Group chunks by note title. A single note may contribute multiple
+          // matching chunks (e.g. two sentences from different parts of the note)
+          // — all of them are passed so the model can see every relevant excerpt.
+          const byTitle = {};
+          for (const m of matches) {
+            if (!byTitle[m.title]) byTitle[m.title] = [];
+            byTitle[m.title].push(m.excerpt);
+          }
+          sourcesUsed = Object.keys(byTitle);
+          const context = Object.entries(byTitle)
+            .map(([title, excerpts]) => `### ${title}\n${excerpts.join('\n')}`)
             .join('\n\n---\n\n');
           const systemMsg = {
             role: 'system',
-            content: `Relevant notes from the user's knowledge base:\n\n${context}\n\nUse these notes to inform your answers where relevant.`,
+            content:
+              `You are a personal knowledge assistant. The user's own notes are provided below.\n\n` +
+              `${context}\n\n` +
+              `Instructions:\n` +
+              `- Base your answer on what the user has written in their notes.\n` +
+              `- If a note contains the user's opinion or statement about something, report it directly using their words.\n` +
+              `- Do not substitute general knowledge for note content. If the notes address the question, the notes come first.\n` +
+              `- If the notes do not contain relevant information, say so clearly instead of answering from general knowledge.`,
           };
           payload = [systemMsg, ...updated];
         }
@@ -61,6 +91,24 @@
       error = String(e);
     } finally {
       isLoading = false;
+    }
+  }
+
+  // ── Debug search ───────────────────────────────────────────────────────────
+
+  let debugQuery = $state('');
+  let debugResults = $state([]);
+  let debugOpen = $state(false);
+
+  async function runDebugSearch() {
+    const q = debugQuery.trim();
+    if (!q) return;
+    try {
+      debugResults = await invoke('debug_search', { query: q });
+      debugOpen = true;
+    } catch (e) {
+      debugResults = [{ title: 'Error', excerpt: String(e), distance: -1 }];
+      debugOpen = true;
     }
   }
 
@@ -104,8 +152,45 @@
     {/if}
   </div>
 
+  {#if notesError}
+    <p class="chat-error">{notesError}</p>
+  {/if}
+
   {#if error}
     <p class="chat-error">{error}</p>
+  {/if}
+
+  {#if sourcesUsed.length > 0}
+    <div class="chat-sources">
+      <span class="chat-sources-label">Sources:</span>
+      {#each sourcesUsed as title}
+        <span class="chat-source-pill">{title}</span>
+      {/each}
+    </div>
+  {/if}
+
+  {#if import.meta.env.DEV}
+  <details class="debug-search" bind:open={debugOpen}>
+    <summary>Debug: raw scores</summary>
+    <div class="debug-input-row">
+      <input bind:value={debugQuery} placeholder="query…" onkeydown={e => e.key === 'Enter' && runDebugSearch()} />
+      <button onclick={runDebugSearch}>Search</button>
+    </div>
+    {#if debugResults.length > 0}
+      <table class="debug-table">
+        <thead><tr><th>dist</th><th>title</th><th>excerpt</th></tr></thead>
+        <tbody>
+          {#each debugResults as r}
+            <tr class:debug-pass={r.distance <= 1.1} class:debug-fail={r.distance > 1.1}>
+              <td>{r.distance.toFixed(3)}</td>
+              <td>{r.title}</td>
+              <td>{r.excerpt}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+  </details>
   {/if}
 
   <div class="chat-input-row">

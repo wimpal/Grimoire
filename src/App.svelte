@@ -2,6 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
   import Chat from './lib/Chat.svelte';
+  import Graph from './lib/Graph.svelte';
 
   // ── State ──────────────────────────────────────────────────────────────────
 
@@ -15,6 +16,12 @@
   let editorContent = $state('');
   let isDirty = $state(false);
 
+  // Tracks the state of the background LanceDB indexing after each save.
+  // 'idle'     — no index operation in progress
+  // 'indexing' — embed calls are running (can be slow with many sentences)
+  // 'error'    — indexing failed; note is saved in SQLite but not searchable
+  let indexState = $state('idle');
+
   // Inline-creation inputs
   let newFolderName = $state('');
   let newNoteTitle = $state('');
@@ -25,8 +32,30 @@
   // Chat panel
   let chatOpen = $state(false);
 
+  // Graph overlay
+  let graphOpen = $state(false);
+
   // Seed state
   let isSeeding = $state(false);
+  let isReindexing = $state(false);
+
+  // Tags and links for the active note
+  let noteTags = $state([]);
+  let noteLinks = $state([]);
+  let noteBacklinks = $state([]);
+  let tagFilter = $state(null); // when set, the note list shows only notes with this tag
+
+  // All tags (for the sidebar browser)
+  let allTags = $state([]);
+  let tagSearch = $state('');
+  const TAG_LIMIT = 3;  let tagsOpen = $state(true);
+  // Tags shown in the sidebar: if searching, filter by prefix match;
+  // otherwise show the top TAG_LIMIT by note count.
+  let visibleTags = $derived(
+    tagSearch.trim()
+      ? allTags.filter(t => t.name.includes(tagSearch.trim().toLowerCase().replace(/^#/, '')))
+      : allTags.slice(0, TAG_LIMIT)
+  );
 
   // Sidebar collapse state
   let foldersOpen = $state(true);
@@ -60,9 +89,19 @@
     }
   }
 
+  async function loadAllTags() {
+    try {
+      allTags = await invoke('list_all_tags');
+    } catch (e) {
+      // Non-fatal — sidebar just shows no tags
+    }
+  }
+
   async function loadNotes() {
     try {
-      if (selectedFolderId === 'all') {
+      if (tagFilter) {
+        notes = await invoke('list_notes_by_tag', { tag: tagFilter });
+      } else if (selectedFolderId === 'all') {
         notes = await invoke('list_notes', { all: true });
       } else {
         // null means "unfiled", a number means a specific folder
@@ -76,6 +115,7 @@
   onMount(async () => {
     await loadFolders();
     await loadNotes();
+    loadAllTags();
   });
 
   // ── Folder actions ─────────────────────────────────────────────────────────
@@ -106,6 +146,7 @@
 
   async function selectFolder(id) {
     selectedFolderId = id;
+    tagFilter = null;
     activeNote = null;
     await loadNotes();
   }
@@ -122,8 +163,11 @@
       newNoteTitle = '';
       await loadNotes();
       openNote(note);
-      // Index in the background — don't block the UI.
-      invoke('index_note', { noteId: note.id, title: note.title, content: '' }).catch(() => {});
+      // Index in the background — don't block the UI, but surface failures.
+      indexState = 'indexing';
+      invoke('index_note', { noteId: note.id, title: note.title, content: '' })
+        .then(() => { indexState = 'idle'; })
+        .catch(() => { indexState = 'error'; });
     } catch (e) {
       showError(e);
     }
@@ -134,6 +178,12 @@
     editorTitle = note.title;
     editorContent = note.content;
     isDirty = false;
+    noteTags = [];
+    noteLinks = [];
+    noteBacklinks = [];
+    invoke('get_note_tags', { noteId: note.id }).then(t => (noteTags = t)).catch(() => {});
+    invoke('get_note_links', { noteId: note.id }).then(l => (noteLinks = l)).catch(() => {});
+    invoke('get_backlinks', { noteId: note.id }).then(b => (noteBacklinks = b)).catch(() => {});
   }
 
   function markDirty() {
@@ -151,7 +201,26 @@
       activeNote = updated;
       isDirty = false;
       await loadNotes(); // refresh the list so the title updates
-      invoke('index_note', { noteId: updated.id, title: editorTitle, content: editorContent }).catch(() => {});
+      // Index in the background — don't block the UI, but surface failures.
+      indexState = 'indexing';
+      invoke('index_note', { noteId: updated.id, title: editorTitle, content: editorContent })
+        .then(() => { indexState = 'idle'; })
+        .catch(() => { indexState = 'error'; });
+      // Sync tags and wiki-links, then refresh the displayed relations.
+      invoke('sync_note_relations', { noteId: updated.id, content: editorContent })
+        .then(() => Promise.all([
+          invoke('get_note_tags', { noteId: updated.id }),
+          invoke('get_note_links', { noteId: updated.id }),
+          invoke('get_backlinks', { noteId: updated.id }),
+          invoke('list_all_tags'),
+        ]))
+        .then(([tags, links, backlinks, updatedAllTags]) => {
+          noteTags = tags;
+          noteLinks = links;
+          noteBacklinks = backlinks;
+          allTags = updatedAllTags;
+        })
+        .catch(() => {});
     } catch (e) {
       showError(e);
     }
@@ -165,6 +234,9 @@
         activeNote = null;
         editorTitle = '';
         editorContent = '';
+        noteTags = [];
+        noteLinks = [];
+        noteBacklinks = [];
       }
       await loadNotes();
       invoke('remove_note_index', { noteId: id }).catch(() => {});
@@ -200,6 +272,78 @@
       showError(e);
     } finally {
       isSeeding = false;
+    }
+  }
+
+  async function reindexAll() {
+    isReindexing = true;
+    try {
+      const n = await invoke('reindex_all');
+      showError(`✓ Re-indexed ${n} notes.`);
+    } catch (e) {
+      showError(e);
+    } finally {
+      isReindexing = false;
+    }
+  }
+
+  async function openNoteById(id) {
+    try {
+      const note = await invoke('get_note', { id });
+      openNote(note);
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  async function filterByTag(tag) {
+    tagFilter = tag;
+    selectedFolderId = null;
+    await loadNotes();
+  }
+
+  async function clearTagFilter() {
+    tagFilter = null;
+    await loadNotes();
+  }
+
+  // Auto-pair brackets in the editor.
+  // `[`  → inserts `[]` and places cursor between them.
+  // `[[` → when the previous char is already `[`, replaces it and inserts `[[]]`
+  //         with cursor between the pairs.
+  function handleEditorKeydown(e) {
+    if (e.key !== '[') return;
+    const el = /** @type {HTMLTextAreaElement} */ (e.currentTarget);
+    const { selectionStart: start, selectionEnd: end, value } = el;
+    const prevChar = value[start - 1];
+
+    e.preventDefault();
+
+    if (prevChar === '[') {
+      // Replace the already-inserted `[` + new `[` with `[[]]`.
+      // If the char after the cursor is `]` (the auto-paired one from the first `[`),
+      // consume it too so we don't end up with [[]]]
+      const before = value.slice(0, start - 1);
+      const after  = value.slice(end + (value[end] === ']' ? 1 : 0));
+      const cursor = before.length + 2; // inside [[ | ]]
+      editorContent = before + '[[]]' + after;
+      markDirty();
+      // Svelte's bind:value updates the DOM asynchronously; schedule cursor move.
+      requestAnimationFrame(() => {
+        el.selectionStart = cursor;
+        el.selectionEnd   = cursor;
+      });
+    } else {
+      // Plain `[` → `[]`.
+      const before = value.slice(0, start);
+      const after  = value.slice(end);
+      const cursor = before.length + 1; // inside [ | ]
+      editorContent = before + '[]' + after;
+      markDirty();
+      requestAnimationFrame(() => {
+        el.selectionStart = cursor;
+        el.selectionEnd   = cursor;
+      });
     }
   }
 </script>
@@ -242,6 +386,40 @@
         />
         <button onclick={createFolder}>+</button>
       </div>
+
+      {#if allTags.length > 0}
+        <div class="sidebar-section-label tags-header">
+          <span>Tags</span>
+          <button class="collapse-btn" onclick={() => (tagsOpen = !tagsOpen)} title={tagsOpen ? 'Collapse' : 'Expand'}>
+            {tagsOpen ? '˅' : '›'}
+          </button>
+        </div>
+        {#if tagsOpen}
+          <div class="tag-search-row">
+            <input
+              class="tag-search-input"
+              bind:value={tagSearch}
+              placeholder="Search tags…"
+            />
+            {#if tagSearch}
+              <button class="clear-filter-btn" onclick={() => (tagSearch = '')} title="Clear">✕</button>
+            {/if}
+          </div>
+          <ul class="tag-list">
+            {#each visibleTags as tag}
+              <li class:active={tagFilter === tag.name}>
+                <button class="row-btn" onclick={() => filterByTag(tag.name)}>#{tag.name}</button>
+                <span class="tag-count">{tag.count}</span>
+              </li>
+            {:else}
+              <li class="empty">No matches</li>
+            {/each}
+          </ul>
+          {#if !tagSearch && allTags.length > TAG_LIMIT}
+            <p class="tag-overflow">{allTags.length - TAG_LIMIT} more — search to find them</p>
+          {/if}
+        {/if}
+      {/if}
     {:else}
       <button class="collapsed-strip" onclick={() => (foldersOpen = true)} title="Expand folders">
         <span>Folders</span>
@@ -254,11 +432,15 @@
     {#if notesOpen}
       <div class="panel-header">
         <h2>
-          {#if selectedFolderId === 'all'}All Notes
+          {#if tagFilter}#{tagFilter}
+          {:else if selectedFolderId === 'all'}All Notes
           {:else if selectedFolderId === null}Unfiled
           {:else}{folders.find(f => f.id === selectedFolderId)?.name ?? ''}
           {/if}
         </h2>
+        {#if tagFilter}
+          <button class="clear-filter-btn" onclick={clearTagFilter} title="Clear tag filter">✕</button>
+        {/if}
         <button class="collapse-btn" onclick={() => (notesOpen = false)} title="Collapse">‹</button>
       </div>
 
@@ -282,11 +464,14 @@
         <button onclick={createNote}>+</button>
       </div>
 
-      {#if notes.length === 0}
+      {#if import.meta.env.DEV && notes.length === 0}
         <button class="seed-btn" onclick={seedNotes} disabled={isSeeding}>
           {isSeeding ? 'Seeding…' : 'Seed test notes'}
         </button>
       {/if}
+      <button class="seed-btn" onclick={reindexAll} disabled={isReindexing}>
+        {isReindexing ? 'Indexing…' : 'Re-index all'}
+      </button>
     {:else}
       <button class="collapsed-strip" onclick={() => (notesOpen = true)} title="Expand notes">
         <span>Notes</span>
@@ -296,9 +481,6 @@
 
   <!-- ── Editor ────────────────────────────────────────────────────── -->
   <main class="editor">
-    <button class="chat-toggle" onclick={() => (chatOpen = !chatOpen)}>
-      {chatOpen ? '✕ Chat' : 'Chat'}
-    </button>
     {#if activeNote}
       <div class="editor-toolbar">
         <input
@@ -319,18 +501,62 @@
               {/each}
             </select>
           </label>
-          <button onclick={saveNote} disabled={!isDirty}>
-            {isDirty ? 'Save (Ctrl+S)' : 'Saved'}
+          <button onclick={saveNote} disabled={!isDirty} class:index-error={!isDirty && indexState === 'error'}>
+            {isDirty ? 'Save (Ctrl+S)' : indexState === 'indexing' ? 'Indexing…' : indexState === 'error' ? '⚠ Index failed' : 'Saved'}
+          </button>
+          <button class="graph-toggle" onclick={() => (graphOpen = !graphOpen)}>
+            {graphOpen ? '✕ Graph' : 'Graph'}
+          </button>
+          <button class="chat-toggle" onclick={() => (chatOpen = !chatOpen)}>
+            {chatOpen ? '✕ Chat' : 'Chat'}
           </button>
         </div>
       </div>
+      {#if noteTags.length > 0}
+        <div class="note-tags-strip">
+          {#each noteTags as tag}
+            <button class="tag-pill" onclick={() => filterByTag(tag)}>#{tag}</button>
+          {/each}
+        </div>
+      {/if}
       <textarea
         class="content-area"
         bind:value={editorContent}
         oninput={markDirty}
+        onkeydown={handleEditorKeydown}
         placeholder="Write your note…"
       ></textarea>
+      {#if noteLinks.length > 0 || noteBacklinks.length > 0}
+        <div class="note-footer">
+          {#if noteLinks.length > 0}
+            <div class="note-footer-section">
+              <span class="note-footer-label">Links</span>
+              {#each noteLinks as link}
+                <button class="link-pill" onclick={() => openNoteById(link.id)}>{link.title}</button>
+              {/each}
+            </div>
+          {/if}
+          {#if noteBacklinks.length > 0}
+            <div class="note-footer-section">
+              <span class="note-footer-label">Backlinks</span>
+              {#each noteBacklinks as link}
+                <button class="link-pill" onclick={() => openNoteById(link.id)}>{link.title}</button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/if}
     {:else}
+      <div class="editor-toolbar">
+        <div class="toolbar-actions">
+          <button class="graph-toggle" onclick={() => (graphOpen = !graphOpen)}>
+            {graphOpen ? '✕ Graph' : 'Graph'}
+          </button>
+          <button class="chat-toggle" onclick={() => (chatOpen = !chatOpen)}>
+            {chatOpen ? '✕ Chat' : 'Chat'}
+          </button>
+        </div>
+      </div>
       <div class="empty-editor">Select or create a note</div>
     {/if}
   </main>
@@ -339,4 +565,18 @@
     <Chat />
   {/if}
 </div>
+
+{#if graphOpen}
+  <div class="graph-overlay">
+    <button class="graph-close" onclick={() => (graphOpen = false)}>✕ Close</button>
+    <Graph
+      activeNoteId={activeNote?.id ?? null}
+      onSelectNote={(id) => {
+        invoke('get_note', { id })
+          .then(note => { openNote(note); graphOpen = false; })
+          .catch(e => showError(e));
+      }}
+    />
+  </div>
+{/if}
 
