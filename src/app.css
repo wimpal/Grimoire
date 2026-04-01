@@ -906,5 +906,52 @@ li:hover .icon-btn {
   padding: 0;
 }
 
+/* ── Lock / password UI ───────────────────────────────────────────── */
 
+.locked-row {
+  opacity: 0.55;
+}
+
+.lock-icon {
+  font-size: 11px;
+  margin-right: 5px;
+  opacity: 0.7;
+}
+
+.note-locked {
+  cursor: default;
+  color: var(--text);
+  font-style: italic;
+}
+
+/* Vault password controls at the bottom of the sidebar */
+.vault-lock-section {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.vault-btn {
+  background: none;
+  border: none;
+  padding: 5px 4px;
+  text-align: left;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 4px;
+  font-family: var(--sans);
+}
+
+.vault-btn:hover {
+  background: var(--bg3);
+  color: var(--text-h);
+}
+
+.vault-btn.danger-text:hover {
+  color: var(--danger);
+}
 

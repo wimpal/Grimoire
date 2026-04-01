@@ -3,6 +3,8 @@
   import { onMount } from 'svelte';
   import Chat from './lib/Chat.svelte';
   import Graph from './lib/Graph.svelte';
+  import LockScreen from './lib/LockScreen.svelte';
+  import PasswordModal from './lib/PasswordModal.svelte';
 
   // ── State ──────────────────────────────────────────────────────────────────
 
@@ -48,7 +50,7 @@
   // All tags (for the sidebar browser)
   let allTags = $state([]);
   let tagSearch = $state('');
-  const TAG_LIMIT = 3;  let tagsOpen = $state(true);
+  const TAG_LIMIT = 3;  let tagsOpen = $state(false);
   // Tags shown in the sidebar: if searching, filter by prefix match;
   // otherwise show the top TAG_LIMIT by note count.
   let visibleTags = $derived(
@@ -60,6 +62,30 @@
   // Sidebar collapse state
   let foldersOpen = $state(true);
   let notesOpen = $state(true);
+
+  // ── Password / lock state ──────────────────────────────────────────────────
+
+  // true while we're waiting for the vault-lock check on startup
+  let lockCheckDone = $state(false);
+  // true when the vault has a password and it hasn't been entered this session
+  let vaultLocked = $state(false);
+  // true when a vault password exists (independent of locked/unlocked state)
+  let vaultHasPassword = $state(false);
+
+  // Modal state for folder unlock
+  let folderUnlockTarget = $state(null); // { id, name } of folder waiting for password
+
+  // Modal state for vault password management
+  // mode: 'set' | 'change' | 'remove' | null
+  let vaultPwModal = $state(null);
+
+  // Modal state for folder password management
+  // mode: 'set' | 'remove' | null, folderId
+  let folderPwModal = $state(null);
+
+  // Set of folder IDs that have been unlocked in the current session.
+  // Used to show the "remove password" button for password-protected folders.
+  let unlockedFolderIds = $state(new Set());
 
   // Compute grid column widths reactively from all panel states.
   // $derived re-evaluates automatically whenever any of its dependencies change.
@@ -113,9 +139,24 @@
   }
 
   onMount(async () => {
-    await loadFolders();
-    await loadNotes();
-    loadAllTags();
+    // Check vault lock state before loading any content.
+    try {
+      const [locked, hasPw] = await Promise.all([
+        invoke('is_vault_locked'),
+        invoke('vault_has_password'),
+      ]);
+      vaultLocked = locked;
+      vaultHasPassword = hasPw;
+    } catch (e) {
+      // If the check itself fails, treat as unlocked (e.g. DB not yet migrated — safe to show).
+    }
+    lockCheckDone = true;
+
+    if (!vaultLocked) {
+      await loadFolders();
+      await loadNotes();
+      loadAllTags();
+    }
   });
 
   // ── Folder actions ─────────────────────────────────────────────────────────
@@ -145,6 +186,8 @@
   }
 
   async function selectFolder(id) {
+    // Auto-save unsaved changes before leaving the current note.
+    if (isDirty) await saveNote();
     selectedFolderId = id;
     tagFilter = null;
     activeNote = null;
@@ -174,6 +217,8 @@
   }
 
   function openNote(note) {
+    // Auto-save unsaved changes before switching to a different note.
+    if (isDirty && activeNote && activeNote.id !== note.id) saveNote();
     activeNote = note;
     editorTitle = note.title;
     editorContent = note.content;
@@ -307,6 +352,125 @@
     await loadNotes();
   }
 
+  // ── Lock / unlock functions ────────────────────────────────────────────────
+
+  async function onVaultUnlocked() {
+    vaultLocked = false;
+    await loadFolders();
+    await loadNotes();
+    loadAllTags();
+    // Re-index notes now that the vault is open.
+    invoke('reindex_all').catch(() => {});
+  }
+
+  async function lockVault() {
+    if (!vaultHasPassword) return;
+    try {
+      await invoke('lock_vault');
+      vaultLocked = true;
+      activeNote = null;
+      notes = [];
+      folders = [];
+      allTags = [];
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  // Called when vault password modal submits.
+  async function handleVaultPwSubmit(password) {
+    if (vaultPwModal === 'set' || vaultPwModal === 'change') {
+      await invoke('set_vault_password', { password });
+      vaultHasPassword = true;
+      vaultPwModal = null;
+      // Re-index now that the vault key is in memory and LanceDB was just purged.
+      invoke('reindex_all').catch(() => {});
+    } else if (vaultPwModal === 'remove') {
+      await invoke('remove_vault_password', { password });
+      vaultHasPassword = false;
+      vaultPwModal = null;
+    }
+    // Return true to dismiss (onSubmit expects true = success).
+    return true;
+  }
+
+  // Called when a locked folder is clicked — show the unlock modal.
+  function requestFolderUnlock(folder) {
+    folderUnlockTarget = folder;
+  }
+
+  async function handleFolderUnlock(password) {
+    const ok = await invoke('unlock_folder', { folderId: folderUnlockTarget.id, password });
+    if (ok) {
+      folderUnlockTarget = null;
+      await loadFolders();
+      await loadNotes();
+      // Index this folder's notes in the background.
+      const folderNotes = await invoke('list_notes', { folderId: folderUnlockTarget?.id ?? null });
+      for (const n of folderNotes) {
+        invoke('index_note', { noteId: n.id, title: n.title, content: n.content }).catch(() => {});
+      }
+    }
+    return ok;
+  }
+
+  // Safe version — folderUnlockTarget is cleared before re-indexing above, so re-read notes.
+  async function handleFolderUnlockSafe(password) {
+    if (!folderUnlockTarget) return false;
+    const targetId = folderUnlockTarget.id;
+    const ok = await invoke('unlock_folder', { folderId: targetId, password });
+    if (ok) {
+      folderUnlockTarget = null;
+      unlockedFolderIds = new Set([...unlockedFolderIds, targetId]);
+      await loadFolders();
+      await loadNotes();
+      // Re-index notes in this folder.
+      invoke('list_notes', { folderId: targetId })
+        .then(ns => {
+          for (const n of ns) {
+            invoke('index_note', { noteId: n.id, title: n.title, content: n.content }).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }
+    return ok;
+  }
+
+  async function handleFolderPwSubmit(password) {
+    if (!folderPwModal) return true;
+    if (folderPwModal.mode === 'set') {
+      await invoke('set_folder_password', { folderId: folderPwModal.folderId, password });
+      // Clear the active note if it belongs to the folder just locked.
+      if (activeNote?.folder_id === folderPwModal.folderId) {
+        activeNote = null;
+        editorTitle = '';
+        editorContent = '';
+      }
+      // Folder is now locked — remove from unlocked session set.
+      const next = new Set(unlockedFolderIds);
+      next.delete(folderPwModal.folderId);
+      unlockedFolderIds = next;
+    } else if (folderPwModal.mode === 'remove') {
+      await invoke('remove_folder_password', { folderId: folderPwModal.folderId, password });
+      // Password gone — remove from unlocked session set.
+      const next = new Set(unlockedFolderIds);
+      next.delete(folderPwModal.folderId);
+      unlockedFolderIds = next;
+      // Re-index after removing folder password.
+      invoke('list_notes', { folderId: folderPwModal.folderId })
+        .then(ns => {
+          for (const n of ns) {
+            invoke('index_note', { noteId: n.id, title: n.title, content: n.content }).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }
+    folderPwModal = null;
+    await loadFolders();
+    await loadNotes();
+    return true;
+  }
+
   // Auto-pair brackets in the editor.
   // `[`  → inserts `[]` and places cursor between them.
   // `[[` → when the previous char is already `[`, replaces it and inserts `[[]]`
@@ -350,8 +514,69 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
+{#if !lockCheckDone}
+  <!-- Blank while we check vault lock state to avoid a flash of content -->
+{:else if vaultLocked}
+  <LockScreen onUnlocked={onVaultUnlocked} />
+{:else}
+
 {#if errorMsg}
   <div class="error-banner">{errorMsg}</div>
+{/if}
+
+<!-- Password modals (rendered above everything) -->
+{#if folderUnlockTarget}
+  <PasswordModal
+    title="Locked folder"
+    confirmLabel="Unlock"
+    onSubmit={handleFolderUnlockSafe}
+    onCancel={() => (folderUnlockTarget = null)}
+  />
+{/if}
+
+{#if vaultPwModal === 'set'}
+  <PasswordModal
+    title="Set vault password"
+    confirmLabel="Set password"
+    warning="If you forget this password, your notes cannot be recovered. There is no reset option."
+    requireAck={true}
+    onSubmit={handleVaultPwSubmit}
+    onCancel={() => (vaultPwModal = null)}
+  />
+{:else if vaultPwModal === 'change'}
+  <PasswordModal
+    title="Change vault password"
+    confirmLabel="Set new password"
+    warning="If you forget this password, your notes cannot be recovered. There is no reset option."
+    requireAck={true}
+    onSubmit={handleVaultPwSubmit}
+    onCancel={() => (vaultPwModal = null)}
+  />
+{:else if vaultPwModal === 'remove'}
+  <PasswordModal
+    title="Remove vault password"
+    confirmLabel="Remove password"
+    onSubmit={handleVaultPwSubmit}
+    onCancel={() => (vaultPwModal = null)}
+  />
+{/if}
+
+{#if folderPwModal?.mode === 'set'}
+  <PasswordModal
+    title="Set folder password"
+    confirmLabel="Set password"
+    warning="If you forget this password, notes in this folder cannot be recovered."
+    requireAck={true}
+    onSubmit={handleFolderPwSubmit}
+    onCancel={() => (folderPwModal = null)}
+  />
+{:else if folderPwModal?.mode === 'remove'}
+  <PasswordModal
+    title="Remove folder password"
+    confirmLabel="Remove password"
+    onSubmit={handleFolderPwSubmit}
+    onCancel={() => (folderPwModal = null)}
+  />
 {/if}
 
 <div class="layout" style:grid-template-columns={gridCols}>
@@ -371,8 +596,21 @@
           <button class="row-btn" onclick={() => selectFolder(null)}>Unfiled</button>
         </li>
         {#each folders as folder (folder.id)}
-          <li class:active={selectedFolderId === folder.id}>
-            <button class="row-btn folder-name" onclick={() => selectFolder(folder.id)}>{folder.name}</button>
+          <li class:active={selectedFolderId === folder.id} class:locked-row={folder.locked}>
+            {#if folder.locked}
+              <button class="row-btn folder-name" onclick={() => requestFolderUnlock(folder)}>
+                <span class="lock-icon">🔒</span>{folder.name === '<locked>' ? '(locked folder)' : folder.name}
+              </button>
+            {:else}
+              <button class="row-btn folder-name" onclick={() => selectFolder(folder.id)}>{folder.name}</button>
+              {#if unlockedFolderIds.has(folder.id)}
+                <button class="icon-btn" title="Remove folder password"
+                  onclick={() => (folderPwModal = { mode: 'remove', folderId: folder.id })}>🔓</button>
+              {:else}
+                <button class="icon-btn" title="Set folder password"
+                  onclick={() => (folderPwModal = { mode: 'set', folderId: folder.id })}>🔑</button>
+              {/if}
+            {/if}
             <button class="icon-btn danger" onclick={() => deleteFolder(folder.id)} title="Delete folder">✕</button>
           </li>
         {/each}
@@ -385,6 +623,25 @@
           onkeydown={(e) => e.key === 'Enter' && createFolder()}
         />
         <button onclick={createFolder}>+</button>
+      </div>
+
+      <!-- Vault password controls -->
+      <div class="vault-lock-section">
+        {#if !vaultHasPassword}
+          <button class="vault-btn" onclick={() => (vaultPwModal = 'set')} title="Password-protect the entire vault">
+            Set vault password
+          </button>
+        {:else}
+          <button class="vault-btn" onclick={() => (vaultPwModal = 'change')} title="Change vault password">
+            Change vault password
+          </button>
+          <button class="vault-btn" onclick={() => (vaultPwModal = 'remove')} title="Remove vault password">
+            Remove vault password
+          </button>
+          <button class="vault-btn danger-text" onclick={lockVault} title="Lock the vault now">
+            Lock vault
+          </button>
+        {/if}
       </div>
 
       {#if allTags.length > 0}
@@ -446,9 +703,13 @@
 
       <ul>
         {#each notes as note (note.id)}
-          <li class:active={activeNote?.id === note.id}>
-            <button class="row-btn note-title" onclick={() => openNote(note)}>{note.title}</button>
-            <button class="icon-btn danger" onclick={() => deleteNote(note.id)} title="Delete note">✕</button>
+          <li class:active={activeNote?.id === note.id} class:locked-row={note.locked}>
+            {#if note.locked}
+              <span class="row-btn note-title note-locked"><span class="lock-icon">🔒</span>(locked)</span>
+            {:else}
+              <button class="row-btn note-title" onclick={() => openNote(note)}>{note.title}</button>
+              <button class="icon-btn danger" onclick={() => deleteNote(note.id)} title="Delete note">✕</button>
+            {/if}
           </li>
         {:else}
           <li class="empty">No notes here</li>
@@ -580,3 +841,4 @@
   </div>
 {/if}
 
+{/if} <!-- end of vault-unlocked block -->

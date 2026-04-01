@@ -30,3 +30,8 @@ lancedb = "0.14"
 arrow-array = "53"
 arrow-schema = "53"
 futures = "0.3"
+argon2 = "0.5"
+aes-gcm = "0.10"
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+base64 = "0.22"

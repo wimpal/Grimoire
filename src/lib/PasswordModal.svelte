@@ -1,0 +1,209 @@
+<script>
+  /**
+   * PasswordModal — reusable modal for password prompts.
+   *
+   * Props:
+   *   title          — heading text
+   *   onSubmit(pw)   — async function; should return true on success, false on wrong password,
+   *                    or throw a string error message
+   *   onCancel       — called when the user dismisses the modal
+   *   confirmLabel   — optional button label (default: "Confirm")
+   *   warning        — optional warning text shown above the input (e.g. no-recovery notice)
+   *   requireAck     — if true, user must check a checkbox before confirming (for irreversible ops)
+   */
+
+  let {
+    title,
+    onSubmit,
+    onCancel,
+    confirmLabel = 'Confirm',
+    warning = '',
+    requireAck = false,
+  } = $props();
+
+  let password = $state('');
+  let error = $state('');
+  let loading = $state(false);
+  let acked = $state(false);
+
+  $effect(() => {
+    // Focus the input when the modal mounts.
+    document.getElementById('pw-modal-input')?.focus();
+  });
+
+  async function submit() {
+    if (!password) return;
+    if (requireAck && !acked) return;
+    loading = true;
+    error = '';
+    try {
+      const result = await onSubmit(password);
+      if (result === false) {
+        error = 'Incorrect password.';
+        password = '';
+      }
+      // On success (true or undefined), the parent dismisses the modal.
+    } catch (e) {
+      error = String(e);
+    } finally {
+      loading = false;
+    }
+  }
+
+  function handleKeydown(e) {
+    if (e.key === 'Enter') submit();
+    if (e.key === 'Escape') onCancel();
+  }
+</script>
+
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="modal-backdrop" onclick={onCancel} onkeydown={handleKeydown} role="dialog" tabindex="-1">
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div class="modal" onclick={(e) => e.stopPropagation()}>
+    <h2 class="modal-title">{title}</h2>
+
+    {#if warning}
+      <p class="modal-warning">{warning}</p>
+      {#if requireAck}
+        <label class="modal-ack">
+          <input type="checkbox" bind:checked={acked} />
+          I understand
+        </label>
+      {/if}
+    {/if}
+
+    <input
+      id="pw-modal-input"
+      type="password"
+      bind:value={password}
+      onkeydown={handleKeydown}
+      placeholder="Password…"
+      disabled={loading}
+    />
+
+    {#if error}
+      <p class="modal-error">{error}</p>
+    {/if}
+
+    <div class="modal-actions">
+      <button class="modal-cancel" onclick={onCancel} disabled={loading}>Cancel</button>
+      <button
+        class="modal-confirm"
+        onclick={submit}
+        disabled={loading || !password || (requireAck && !acked)}
+      >
+        {loading ? 'Working…' : confirmLabel}
+      </button>
+    </div>
+  </div>
+</div>
+
+<style>
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 500;
+  }
+
+  .modal {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    width: 300px;
+  }
+
+  .modal-title {
+    font: 600 14px/1 var(--sans);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-h);
+    margin: 0;
+  }
+
+  .modal-warning {
+    font-size: 12px;
+    color: var(--danger);
+    margin: 0;
+    line-height: 1.5;
+  }
+
+  .modal-ack {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text);
+    cursor: pointer;
+  }
+
+  input[type="password"] {
+    width: 100%;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    background: var(--bg2);
+    color: var(--text-h);
+    font: 14px var(--sans);
+    border-radius: 4px;
+    outline: none;
+  }
+
+  input[type="password"]:focus {
+    border-color: var(--accent);
+  }
+
+  .modal-error {
+    font-size: 12px;
+    color: var(--danger);
+    margin: 0;
+  }
+
+  .modal-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 4px;
+  }
+
+  .modal-cancel {
+    padding: 6px 14px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text);
+    font: 13px var(--sans);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .modal-cancel:not(:disabled):hover {
+    background: var(--bg3);
+  }
+
+  .modal-confirm {
+    padding: 6px 14px;
+    border: 1px solid var(--accent);
+    background: var(--accent-bg);
+    color: var(--accent);
+    font: 13px var(--sans);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .modal-confirm:not(:disabled):hover {
+    background: var(--accent);
+    color: #fff;
+  }
+
+  .modal-confirm:disabled,
+  .modal-cancel:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+</style>

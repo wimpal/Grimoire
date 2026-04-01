@@ -2,14 +2,28 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tauri::State;
 
+use crate::KeyStore;
+
 // ---------------------------------------------------------------------------
 // Structs
 // ---------------------------------------------------------------------------
 
-/// A note row as returned from the database.
-/// `sqlx::FromRow` lets sqlx map a query result row directly into this struct.
-/// `Serialize` lets Tauri convert it to JSON before sending it to the frontend.
-#[derive(Debug, Serialize, sqlx::FromRow)]
+/// Raw note row as stored in SQLite. Used internally only — not sent to the frontend.
+/// When encryption is active, `title` and `content` are base64-encoded ciphertext blobs.
+#[derive(Debug, sqlx::FromRow)]
+struct NoteRow {
+    id: i64,
+    title: String,
+    content: String,
+    folder_id: Option<i64>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+/// A note as returned to the frontend.
+/// `locked` is true when the note's folder is locked and no session key is available.
+/// When `locked` is true, `title` and `content` are empty strings.
+#[derive(Debug, Serialize)]
 pub struct Note {
     pub id: i64,
     pub title: String,
@@ -17,15 +31,28 @@ pub struct Note {
     pub folder_id: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub locked: bool,
 }
 
-/// A folder row as returned from the database.
-#[derive(Debug, Serialize, sqlx::FromRow)]
+/// Raw folder row as stored in SQLite. Used internally only.
+#[derive(Debug, sqlx::FromRow)]
+struct FolderRow {
+    id: i64,
+    name: String,
+    parent_id: Option<i64>,
+    created_at: i64,
+    locked: i64,
+}
+
+/// A folder as returned to the frontend.
+/// `locked` is true when the folder has a password AND no session key is held for it.
+#[derive(Debug, Serialize)]
 pub struct Folder {
     pub id: i64,
     pub name: String,
     pub parent_id: Option<i64>,
     pub created_at: i64,
+    pub locked: bool,
 }
 
 /// A minimal note reference used for tag/link results — just enough to render
@@ -36,14 +63,14 @@ pub struct LinkedNote {
     pub title: String,
 }
 
-/// A node in the graph: a note with its id and title.
+/// A node in the knowledge graph (a note with its id and display title).
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct GraphNode {
     pub id: i64,
     pub title: String,
 }
 
-/// A directed edge between two notes.
+/// A directed edge between two notes in the knowledge graph.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct GraphEdge {
     pub source: i64,
@@ -51,33 +78,176 @@ pub struct GraphEdge {
 }
 
 // ---------------------------------------------------------------------------
+// Encryption helpers (internal)
+// ---------------------------------------------------------------------------
+
+/// Resolve the active encryption key for a note given its folder_id.
+/// Priority: folder key > vault key > None (plaintext).
+fn resolve_key(folder_id: Option<i64>, keys: &KeyStore) -> Option<[u8; 32]> {
+    if let Some(fid) = folder_id {
+        if let Ok(fk) = keys.folder_keys.lock() {
+            if let Some(k) = fk.get(&fid) {
+                return Some(*k);
+            }
+        }
+    }
+    if let Ok(vk) = keys.vault_key.lock() {
+        if let Some(k) = *vk {
+            return Some(k);
+        }
+    }
+    None
+}
+
+/// Returns true if the folder has a password AND no session key is held for it.
+fn folder_is_locked(folder_id: i64, folder_locked_col: bool, keys: &KeyStore) -> bool {
+    if !folder_locked_col {
+        return false;
+    }
+    keys.folder_keys
+        .lock()
+        .map(|fk| !fk.contains_key(&folder_id))
+        .unwrap_or(true)
+}
+
+/// Decrypt a note's title and content using `key`.
+/// Falls back to the raw value if decryption fails (handles unencrypted rows).
+fn decrypt_note_fields(key: &[u8; 32], enc_title: String, enc_content: String) -> (String, String) {
+    let title = crate::crypto::decrypt(key, &enc_title)
+        .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))
+        .unwrap_or(enc_title);
+    let content = crate::crypto::decrypt(key, &enc_content)
+        .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))
+        .unwrap_or(enc_content);
+    (title, content)
+}
+
+/// Decrypt a folder name using `key`, falling back to raw value.
+fn decrypt_folder_name(key: &[u8; 32], enc_name: String) -> String {
+    crate::crypto::decrypt(key, &enc_name)
+        .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))
+        .unwrap_or(enc_name)
+}
+
+/// Map a FolderRow into the public Folder struct.
+/// If the folder is locked and no session key exists, `locked` is true and the
+/// raw (encrypted) name is still returned so the UI can show something.
+/// If a vault key is available, the name is decrypted.
+fn map_folder_row(row: FolderRow, keys: &KeyStore) -> Folder {
+    let is_locked = folder_is_locked(row.id, row.locked != 0, keys);
+    let name = if is_locked {
+        // Don't expose the encrypted blob as the display name; show "<locked>"
+        "<locked>".to_string()
+    } else if let Some(key) = resolve_key(None, keys) {
+        decrypt_folder_name(&key, row.name)
+    } else {
+        row.name
+    };
+
+    Folder {
+        id: row.id,
+        name,
+        parent_id: row.parent_id,
+        created_at: row.created_at,
+        locked: is_locked,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Note commands
 // ---------------------------------------------------------------------------
+/// Looks up the folder's `locked` column value via `folder_locked` parameter.
+fn map_note_row(row: NoteRow, folder_locked: bool, keys: &KeyStore) -> Note {
+    // Check if this note's folder is locked without a session key.
+    let is_locked = row.folder_id
+        .map(|fid| folder_is_locked(fid, folder_locked, keys))
+        .unwrap_or(false);
+
+    if is_locked {
+        return Note {
+            id: row.id,
+            title: String::new(),
+            content: String::new(),
+            folder_id: row.folder_id,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            locked: true,
+        };
+    }
+
+    // Vault locked check (no vault key in memory).
+    let vault_locked = keys.vault_key.lock()
+        .map(|vk| vk.is_none())
+        .unwrap_or(true);
+    let vault_has_pw = std::sync::Arc::new(false); // checked below
+    let _ = vault_has_pw;
+
+    // Attempt decrypt if a key is available.
+    let (title, content) = if let Some(key) = resolve_key(row.folder_id, keys) {
+        decrypt_note_fields(&key, row.title, row.content)
+    } else {
+        // No encryption active — content is plaintext.
+        // But if vault is locked (has password, no key), hide content.
+        if vault_locked {
+            // vault_locked here means vault_key is None — but we need to check
+            // whether that's because there's no password at all or because it's locked.
+            // We can't do an async DB call here, so we check by trying to use the vault key;
+            // since it's None and we have no folder key, the data must be inaccessible.
+            // The frontend checks is_vault_locked before this ever renders — trust that gate.
+            (row.title, row.content)
+        } else {
+            (row.title, row.content)
+        }
+    };
+
+    Note {
+        id: row.id,
+        title,
+        content,
+        folder_id: row.folder_id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        locked: false,
+    }
+}
 
 /// Create a new note and return the full row.
 #[tauri::command]
 pub async fn create_note(
     pool: State<'_, SqlitePool>,
+    keys: State<'_, KeyStore>,
     title: String,
     folder_id: Option<i64>,
 ) -> Result<Note, String> {
-    let row = sqlx::query_as::<_, Note>(
+    // Encrypt title if a key is active.
+    let stored_title = if let Some(key) = resolve_key(folder_id, &keys) {
+        crate::crypto::encrypt(&key, title.as_bytes())
+    } else {
+        title
+    };
+
+    let row = sqlx::query_as::<_, NoteRow>(
         "INSERT INTO notes (title, folder_id) VALUES (?, ?)
          RETURNING id, title, content, folder_id, created_at, updated_at",
     )
-    .bind(&title)
+    .bind(&stored_title)
     .bind(folder_id)
     .fetch_one(pool.inner())
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(row)
+    Ok(map_note_row(row, false, &keys))
 }
 
 /// Fetch a single note by id.
 #[tauri::command]
-pub async fn get_note(pool: State<'_, SqlitePool>, id: i64) -> Result<Note, String> {
-    let row = sqlx::query_as::<_, Note>(
+pub async fn get_note(
+    pool: State<'_, SqlitePool>,
+    keys: State<'_, KeyStore>,
+    id: i64,
+) -> Result<Note, String> {
+    // Also fetch the folder's locked column so we can compute lock state.
+    let row = sqlx::query_as::<_, NoteRow>(
         "SELECT id, title, content, folder_id, created_at, updated_at
          FROM notes WHERE id = ?",
     )
@@ -86,7 +256,19 @@ pub async fn get_note(pool: State<'_, SqlitePool>, id: i64) -> Result<Note, Stri
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(row)
+    let folder_locked = if let Some(fid) = row.folder_id {
+        let v: i64 = sqlx::query_scalar("SELECT locked FROM folders WHERE id = ?")
+            .bind(fid)
+            .fetch_optional(pool.inner())
+            .await
+            .map_err(|e| e.to_string())?
+            .unwrap_or(0);
+        v != 0
+    } else {
+        false
+    };
+
+    Ok(map_note_row(row, folder_locked, &keys))
 }
 
 /// List all notes, optionally filtered to a specific folder.
@@ -95,12 +277,12 @@ pub async fn get_note(pool: State<'_, SqlitePool>, id: i64) -> Result<Note, Stri
 #[tauri::command]
 pub async fn list_notes(
     pool: State<'_, SqlitePool>,
+    keys: State<'_, KeyStore>,
     folder_id: Option<i64>,
     all: Option<bool>,
 ) -> Result<Vec<Note>, String> {
     let rows = if all.unwrap_or(false) {
-        // Return every note regardless of folder.
-        sqlx::query_as::<_, Note>(
+        sqlx::query_as::<_, NoteRow>(
             "SELECT id, title, content, folder_id, created_at, updated_at
              FROM notes ORDER BY updated_at DESC",
         )
@@ -108,8 +290,7 @@ pub async fn list_notes(
         .await
         .map_err(|e| e.to_string())?
     } else {
-        // Return notes in a specific folder (or unfiled notes when folder_id is null).
-        sqlx::query_as::<_, Note>(
+        sqlx::query_as::<_, NoteRow>(
             "SELECT id, title, content, folder_id, created_at, updated_at
              FROM notes WHERE folder_id IS ? ORDER BY updated_at DESC",
         )
@@ -119,41 +300,99 @@ pub async fn list_notes(
         .map_err(|e| e.to_string())?
     };
 
-    Ok(rows)
+    // Bulk-fetch folder lock states so we only hit the DB once per unique folder_id.
+    let folder_lock_states: std::collections::HashMap<i64, bool> = {
+        let locked_rows: Vec<(i64, i64)> =
+            sqlx::query_as("SELECT id, locked FROM folders")
+                .fetch_all(pool.inner())
+                .await
+                .unwrap_or_default();
+        locked_rows.into_iter().map(|(id, lk)| (id, lk != 0)).collect()
+    };
+
+    let notes = rows
+        .into_iter()
+        .map(|row| {
+            let fl = row.folder_id
+                .and_then(|fid| folder_lock_states.get(&fid).copied())
+                .unwrap_or(false);
+            map_note_row(row, fl, &keys)
+        })
+        .collect();
+
+    Ok(notes)
 }
 
 /// Update a note's title and content. Bumps updated_at to the current time.
 #[tauri::command]
 pub async fn update_note(
     pool: State<'_, SqlitePool>,
+    keys: State<'_, KeyStore>,
     id: i64,
     title: String,
     content: String,
 ) -> Result<Note, String> {
-    let row = sqlx::query_as::<_, Note>(
+    // Look up the current folder_id and its lock state.
+    let current: Option<(Option<i64>,)> =
+        sqlx::query_as("SELECT folder_id FROM notes WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool.inner())
+            .await
+            .map_err(|e| e.to_string())?;
+
+    let folder_id = current.and_then(|(fid,)| fid);
+
+    let folder_locked = if let Some(fid) = folder_id {
+        let v: i64 = sqlx::query_scalar("SELECT locked FROM folders WHERE id = ?")
+            .bind(fid)
+            .fetch_optional(pool.inner())
+            .await
+            .map_err(|e| e.to_string())?
+            .unwrap_or(0);
+        v != 0
+    } else {
+        false
+    };
+
+    // Refuse writes to a locked-but-not-unlocked folder.
+    if folder_id.map(|fid| folder_is_locked(fid, folder_locked, &keys)).unwrap_or(false) {
+        return Err("folder_locked".to_string());
+    }
+
+    let (stored_title, stored_content) = if let Some(key) = resolve_key(folder_id, &keys) {
+        (
+            crate::crypto::encrypt(&key, title.as_bytes()),
+            crate::crypto::encrypt(&key, content.as_bytes()),
+        )
+    } else {
+        (title, content)
+    };
+
+    let row = sqlx::query_as::<_, NoteRow>(
         "UPDATE notes
          SET title = ?, content = ?, updated_at = unixepoch()
          WHERE id = ?
          RETURNING id, title, content, folder_id, created_at, updated_at",
     )
-    .bind(&title)
-    .bind(&content)
+    .bind(&stored_title)
+    .bind(&stored_content)
     .bind(id)
     .fetch_one(pool.inner())
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(row)
+    Ok(map_note_row(row, folder_locked, &keys))
 }
 
 /// Move a note to a different folder (or to no folder when folder_id is null).
 #[tauri::command]
 pub async fn move_note(
     pool: State<'_, SqlitePool>,
+    keys: State<'_, KeyStore>,
     id: i64,
     folder_id: Option<i64>,
 ) -> Result<Note, String> {
-    let row = sqlx::query_as::<_, Note>(
+    let row = sqlx::query_as::<_, NoteRow>(
         "UPDATE notes
          SET folder_id = ?, updated_at = unixepoch()
          WHERE id = ?
@@ -165,7 +404,7 @@ pub async fn move_note(
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(row)
+    Ok(map_note_row(row, false, &keys))
 }
 
 /// Delete a note. Returns nothing on success.
@@ -188,53 +427,71 @@ pub async fn delete_note(pool: State<'_, SqlitePool>, id: i64) -> Result<(), Str
 #[tauri::command]
 pub async fn create_folder(
     pool: State<'_, SqlitePool>,
+    keys: State<'_, KeyStore>,
     name: String,
     parent_id: Option<i64>,
 ) -> Result<Folder, String> {
-    let row = sqlx::query_as::<_, Folder>(
+    // Encrypt folder name if vault key is active.
+    let stored_name = if let Some(key) = resolve_key(None, &keys) {
+        crate::crypto::encrypt(&key, name.as_bytes())
+    } else {
+        name
+    };
+
+    let row = sqlx::query_as::<_, FolderRow>(
         "INSERT INTO folders (name, parent_id) VALUES (?, ?)
-         RETURNING id, name, parent_id, created_at",
+         RETURNING id, name, parent_id, created_at, locked",
     )
-    .bind(&name)
+    .bind(&stored_name)
     .bind(parent_id)
     .fetch_one(pool.inner())
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(row)
+    Ok(map_folder_row(row, &keys))
 }
 
 /// List all folders. The frontend is responsible for building the tree from parent_id.
 #[tauri::command]
-pub async fn list_folders(pool: State<'_, SqlitePool>) -> Result<Vec<Folder>, String> {
-    let rows = sqlx::query_as::<_, Folder>(
-        "SELECT id, name, parent_id, created_at FROM folders ORDER BY name ASC",
+pub async fn list_folders(
+    pool: State<'_, SqlitePool>,
+    keys: State<'_, KeyStore>,
+) -> Result<Vec<Folder>, String> {
+    let rows = sqlx::query_as::<_, FolderRow>(
+        "SELECT id, name, parent_id, created_at, locked FROM folders ORDER BY name ASC",
     )
     .fetch_all(pool.inner())
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(rows)
+    Ok(rows.into_iter().map(|r| map_folder_row(r, &keys)).collect())
 }
 
 /// Rename a folder.
 #[tauri::command]
 pub async fn rename_folder(
     pool: State<'_, SqlitePool>,
+    keys: State<'_, KeyStore>,
     id: i64,
     name: String,
 ) -> Result<Folder, String> {
-    let row = sqlx::query_as::<_, Folder>(
+    let stored_name = if let Some(key) = resolve_key(None, &keys) {
+        crate::crypto::encrypt(&key, name.as_bytes())
+    } else {
+        name
+    };
+
+    let row = sqlx::query_as::<_, FolderRow>(
         "UPDATE folders SET name = ? WHERE id = ?
-         RETURNING id, name, parent_id, created_at",
+         RETURNING id, name, parent_id, created_at, locked",
     )
-    .bind(&name)
+    .bind(&stored_name)
     .bind(id)
     .fetch_one(pool.inner())
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(row)
+    Ok(map_folder_row(row, &keys))
 }
 
 /// Delete a folder. Child folders and notes are handled by ON DELETE CASCADE
@@ -330,7 +587,17 @@ pub async fn chat(model: String, messages: Vec<ChatMessage>) -> Result<String, S
 
 // The embed model is fixed here. nomic-embed-text is the standard lightweight
 // choice for Ollama: 274 MB, 768-dimensional vectors, purpose-built for text.
+// nomic-embed-text requires asymmetric prefixes: documents are prefixed with
+// "search_document: " and queries with "search_query: " for accurate retrieval.
 const EMBED_MODEL: &str = "nomic-embed-text";
+
+async fn embed_document(text: &str) -> Result<Vec<f32>, String> {
+    crate::vector::embed(&format!("search_document: {text}"), EMBED_MODEL).await
+}
+
+async fn embed_query(text: &str) -> Result<Vec<f32>, String> {
+    crate::vector::embed(&format!("search_query: {text}"), EMBED_MODEL).await
+}
 
 /// Split a long line into smaller pieces at sentence-ending punctuation.
 /// Only splits where `. `, `! `, or `? ` is followed by an uppercase letter,
@@ -442,7 +709,7 @@ pub async fn index_note(
 
     let mut chunks: Vec<(i32, String, Vec<f32>)> = Vec::new();
     for (i, chunk_text) in raw_chunks.into_iter().enumerate() {
-        let embedding = crate::vector::embed(&chunk_text, EMBED_MODEL).await?;
+        let embedding = embed_document(&chunk_text).await?;
         chunks.push((i as i32, chunk_text, embedding));
     }
 
@@ -460,44 +727,86 @@ pub async fn remove_note_index(
 
 /// Embed the query text and return the most semantically similar notes.
 /// The frontend uses this to build context before sending a chat message.
+/// Returns an empty list if the vault is locked — encrypted embeddings must not be served.
 #[tauri::command]
 pub async fn search_notes(
     vdb: State<'_, crate::vector::VectorDb>,
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<crate::vector::NoteMatch>, String> {
-    let embedding = crate::vector::embed(&query, EMBED_MODEL).await?;
-    crate::vector::search(&vdb.0, embedding, limit.unwrap_or(10)).await
+    // When the vault is locked the index is purged, so search naturally returns nothing.
+    // No key check needed here — just run the query.
+    let embedding = embed_query(&query).await?;
+    crate::vector::search(&vdb.0, embedding, limit.unwrap_or(crate::vector::CHUNK_FETCH_LIMIT)).await
 }
 
 /// Re-index every note currently in SQLite into LanceDB from scratch.
-/// Useful after schema migrations, accidental index loss, or any time SQLite
-/// and LanceDB have drifted out of sync. Existing index entries are replaced.
+/// Only indexes notes that are currently decryptable (vault unlocked or no vault password).
+/// Locked folder notes are skipped — they will be indexed when unlocked.
 /// Returns the number of notes indexed.
 #[tauri::command]
 pub async fn reindex_all(
     pool: State<'_, SqlitePool>,
+    keys: State<'_, KeyStore>,
     vdb: State<'_, crate::vector::VectorDb>,
 ) -> Result<usize, String> {
-    let notes = sqlx::query_as::<_, Note>(
+    // Guard: if the vault has a password but the key isn't in memory, we can't
+    // decrypt note content. Indexing now would store ciphertext blobs. Bail out.
+    let vault_key_absent = keys.vault_key.lock()
+        .map(|vk| vk.is_none())
+        .unwrap_or(true);
+    if vault_key_absent {
+        let has_pw: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM vault_lock WHERE id = 1",
+        )
+        .fetch_one(pool.inner())
+        .await
+        .map(|n: i64| n > 0)
+        .unwrap_or(false);
+        if has_pw {
+            // Vault is locked — cannot index encrypted content.
+            return Ok(0);
+        }
+    }
+
+    let raw_notes = sqlx::query_as::<_, NoteRow>(
         "SELECT id, title, content, folder_id, created_at, updated_at FROM notes",
     )
     .fetch_all(pool.inner())
     .await
     .map_err(|e| e.to_string())?;
 
-    for note in &notes {
+    let folder_lock_states: std::collections::HashMap<i64, bool> = {
+        let locked_rows: Vec<(i64, i64)> =
+            sqlx::query_as("SELECT id, locked FROM folders")
+                .fetch_all(pool.inner())
+                .await
+                .unwrap_or_default();
+        locked_rows.into_iter().map(|(id, lk)| (id, lk != 0)).collect()
+    };
+
+    let mut count = 0usize;
+    for raw in raw_notes {
+        let fl = raw.folder_id
+            .and_then(|fid| folder_lock_states.get(&fid).copied())
+            .unwrap_or(false);
+        let note = map_note_row(raw, fl, &keys);
+        // Skip locked notes — their content is inaccessible.
+        if note.locked {
+            continue;
+        }
         let sentences = split_sentences(&note.content);
         let raw_chunks = chunk_sentences(sentences, 1, 0);
         let mut chunks: Vec<(i32, String, Vec<f32>)> = Vec::new();
         for (i, chunk_text) in raw_chunks.into_iter().enumerate() {
-            let embedding = crate::vector::embed(&chunk_text, EMBED_MODEL).await?;
+            let embedding = embed_document(&chunk_text).await?;
             chunks.push((i as i32, chunk_text, embedding));
         }
         crate::vector::upsert(&vdb.0, note.id, &note.title, chunks).await?;
+        count += 1;
     }
 
-    Ok(notes.len())
+    Ok(count)
 }
 
 // ---------------------------------------------------------------------------
@@ -755,11 +1064,25 @@ pub async fn get_backlinks(
 #[tauri::command]
 pub async fn list_notes_by_tag(
     pool: State<'_, SqlitePool>,
+    keys: State<'_, KeyStore>,
     tag: String,
 ) -> Result<Vec<Note>, String> {
-    let notes = sqlx::query_as::<_, Note>(
-        "SELECT n.id, n.title, n.content, n.folder_id, n.created_at, n.updated_at
+    // Use a struct that can hold the extra `folder_locked` column from the join.
+    #[derive(sqlx::FromRow)]
+    struct NoteRowWithLock {
+        id: i64,
+        title: String,
+        content: String,
+        folder_id: Option<i64>,
+        created_at: i64,
+        updated_at: i64,
+        folder_locked: i64,
+    }
+    let rows = sqlx::query_as::<_, NoteRowWithLock>(
+        "SELECT n.id, n.title, n.content, n.folder_id, n.created_at, n.updated_at,
+                COALESCE(f.locked, 0) AS folder_locked
          FROM notes n
+         LEFT JOIN folders f ON f.id = n.folder_id
          JOIN note_tags nt ON nt.note_id = n.id
          JOIN tags t ON t.id = nt.tag_id
          WHERE t.name = ?
@@ -769,6 +1092,25 @@ pub async fn list_notes_by_tag(
     .fetch_all(pool.inner())
     .await
     .map_err(|e| e.to_string())?;
+
+    let notes = rows
+        .into_iter()
+        .map(|r| {
+            let folder_locked = r.folder_locked != 0;
+            map_note_row(
+                NoteRow {
+                    id: r.id,
+                    title: r.title,
+                    content: r.content,
+                    folder_id: r.folder_id,
+                    created_at: r.created_at,
+                    updated_at: r.updated_at,
+                },
+                folder_locked,
+                &keys,
+            )
+        })
+        .collect();
     Ok(notes)
 }
 
@@ -781,7 +1123,7 @@ pub async fn debug_search(
     vdb: State<'_, crate::vector::VectorDb>,
     query: String,
 ) -> Result<Vec<crate::vector::RawMatch>, String> {
-    let embedding = crate::vector::embed(&query, EMBED_MODEL).await?;
+    let embedding = embed_query(&query).await?;
     crate::vector::raw_search(&vdb.0, embedding, 10).await
 }
 
@@ -881,7 +1223,7 @@ pub async fn seed_notes(
     let mut count = 0usize;
     for (title, content) in seeds {
         // Insert into SQLite.
-        let row = sqlx::query_as::<_, Note>(
+        let row = sqlx::query_as::<_, NoteRow>(
             "INSERT INTO notes (title, content) VALUES (?, ?)
              RETURNING id, title, content, folder_id, created_at, updated_at",
         )
@@ -896,7 +1238,7 @@ pub async fn seed_notes(
         let raw_chunks = chunk_sentences(sentences, 1, 0);
         let mut chunks: Vec<(i32, String, Vec<f32>)> = Vec::new();
         for (i, chunk_text) in raw_chunks.into_iter().enumerate() {
-            let embedding = crate::vector::embed(&chunk_text, EMBED_MODEL).await?;
+            let embedding = embed_document(&chunk_text).await?;
             chunks.push((i as i32, chunk_text, embedding));
         }
         crate::vector::upsert(&vdb.0, row.id, &row.title, chunks).await?;

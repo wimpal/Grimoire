@@ -217,6 +217,21 @@ pub async fn remove(conn: &Connection, note_id: i64) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Delete all rows from the vector index.
+/// Called when a vault password is set — encrypted notes must not remain searchable.
+pub async fn purge_all(conn: &Connection) -> Result<(), String> {
+    let table = open_table(conn).await?;
+    let count = table.count_rows(None).await.map_err(|e| e.to_string())?;
+    if count == 0 {
+        return Ok(());
+    }
+    // LanceDB delete with a condition that matches every row.
+    table
+        .delete("note_id >= 0")
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// A note returned from a semantic search.
 #[derive(Debug, Serialize)]
 pub struct NoteMatch {
@@ -236,11 +251,12 @@ pub struct RawMatch {
 }
 
 /// Maximum number of distinct notes to include in search results.
-/// Chunks are ordered by ascending cosine distance, so the top MAX_SOURCE_NOTES
-/// notes are always the closest matches. The LLM's system prompt instructs it to
-/// say "not in your notes" when the context doesn't address the question, so we
-/// don't need a distance-gap filter — just cap the sources and let the LLM judge.
-const MAX_SOURCE_NOTES: usize = 3;
+const MAX_SOURCE_NOTES: usize = 5;
+/// How many raw chunks to retrieve from LanceDB per search.
+/// Must be larger than MAX_SOURCE_NOTES to allow deduplication to work — if a
+/// long note contributes many top-ranked chunks they will all count as one note,
+/// leaving room for shorter/newer notes to appear in the final result set.
+pub const CHUNK_FETCH_LIMIT: usize = 100;
 /// Search the vector index for notes semantically similar to the query embedding.
 /// Returns up to `limit` individual chunk results ordered by similarity.
 /// Chunks whose cosine distance exceeds MAX_DISTANCE are silently dropped, so
@@ -277,11 +293,11 @@ pub async fn search(
         .map_err(|e| e.to_string())?;
 
     let mut results = Vec::new();
-    // Track which note IDs have already contributed at least one chunk so we
-    // can enforce the MAX_SOURCE_NOTES cap.
+    // Best chunk per note (lowest distance = most relevant). We collect one
+    // representative excerpt per unique note, then return the top MAX_SOURCE_NOTES.
     let mut seen_notes: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
-    'outer: for batch in &batches {
+    for batch in &batches {
         let ids = batch
             .column_by_name("note_id")
             .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
@@ -296,6 +312,14 @@ pub async fn search(
             .ok_or("missing content column in search results")?;
 
         for i in 0..batch.num_rows() {
+            let note_id = ids.value(i);
+
+            // Only take the first (best-ranked) chunk per note.
+            if seen_notes.contains(&note_id) {
+                continue;
+            }
+            seen_notes.insert(note_id);
+
             let raw = contents.value(i);
             let excerpt = if raw.chars().count() > 500 {
                 let cutoff = raw
@@ -308,25 +332,15 @@ pub async fn search(
                 raw.to_string()
             };
 
-            let note_id = ids.value(i);
-            // Enforce distinct-note cap: if this note is new and we've already
-            // hit the limit, skip without breaking — a higher-distance chunk
-            // from an already-seen note might still appear later in the batch.
-            if !seen_notes.contains(&note_id) {
-                if seen_notes.len() >= MAX_SOURCE_NOTES {
-                    continue;
-                }
-                seen_notes.insert(note_id);
-            }
-
             results.push(NoteMatch {
                 note_id,
                 title: titles.value(i).to_string(),
                 excerpt,
             });
 
-            if results.len() >= limit {
-                break 'outer;
+            // Stop once we have enough distinct notes.
+            if seen_notes.len() >= MAX_SOURCE_NOTES {
+                return Ok(results);
             }
         }
     }

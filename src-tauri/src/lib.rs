@@ -1,8 +1,23 @@
+mod auth;
 mod commands;
+mod crypto;
 mod db;
 mod vector;
 
+use std::collections::HashMap;
+use std::sync::Mutex;
 use tauri::Manager;
+
+/// In-memory store for derived encryption keys.
+/// Keys are never persisted to disk — they live only for the duration of the
+/// app session. Restarting the app clears all keys, requiring re-unlock.
+///
+/// `vault_key`    — Some(...) when the vault password has been entered this session.
+/// `folder_keys`  — maps folder_id → derived key for each unlocked folder this session.
+pub struct KeyStore {
+    pub vault_key: Mutex<Option<[u8; 32]>>,
+    pub folder_keys: Mutex<HashMap<i64, [u8; 32]>>,
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -27,6 +42,11 @@ pub fn run() {
                     .await
                     .expect("failed to initialise vector database");
                 app_handle.manage(vector::VectorDb(vdb));
+
+                app_handle.manage(KeyStore {
+                    vault_key: Mutex::new(None),
+                    folder_keys: Mutex::new(HashMap::new()),
+                });
             });
 
             Ok(())
@@ -59,6 +79,16 @@ pub fn run() {
         commands::get_graph_data,
         commands::debug_search,
         commands::seed_notes,
+        auth::vault_has_password,
+        auth::is_vault_locked,
+        auth::unlock_vault,
+        auth::lock_vault,
+        auth::set_vault_password,
+        auth::remove_vault_password,
+        auth::set_folder_password,
+        auth::remove_folder_password,
+        auth::unlock_folder,
+        auth::lock_folder,
     ]);
 
     #[cfg(not(debug_assertions))]
@@ -85,6 +115,16 @@ pub fn run() {
         commands::list_notes_by_tag,
         commands::list_all_tags,
         commands::get_graph_data,
+        auth::vault_has_password,
+        auth::is_vault_locked,
+        auth::unlock_vault,
+        auth::lock_vault,
+        auth::set_vault_password,
+        auth::remove_vault_password,
+        auth::set_folder_password,
+        auth::remove_folder_password,
+        auth::unlock_folder,
+        auth::lock_folder,
     ]);
 
     builder

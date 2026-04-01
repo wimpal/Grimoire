@@ -72,13 +72,13 @@
           const systemMsg = {
             role: 'system',
             content:
-              `You are a personal knowledge assistant. The user's own notes are provided below.\n\n` +
+              `You are a personal knowledge assistant for the user. Their notes are below.\n\n` +
               `${context}\n\n` +
-              `Instructions:\n` +
-              `- Base your answer on what the user has written in their notes.\n` +
-              `- If a note contains the user's opinion or statement about something, report it directly using their words.\n` +
-              `- Do not substitute general knowledge for note content. If the notes address the question, the notes come first.\n` +
-              `- If the notes do not contain relevant information, say so clearly instead of answering from general knowledge.`,
+              `IMPORTANT RULES:\n` +
+              `1. Read every note section above carefully before answering.\n` +
+              `2. If ANY note contains information that answers the question — even a single sentence — you MUST report it. Do NOT say the user hasn't mentioned something if it appears above.\n` +
+              `3. Quote or paraphrase the user's own words when reporting what they've written.\n` +
+              `4. Only say the notes don't contain something if you have checked every section and found nothing relevant.`,
           };
           payload = [systemMsg, ...updated];
         }

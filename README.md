@@ -19,7 +19,3 @@ A local-first note-taking app with built-in LLM assistance. Everything runs on y
 npm install
 npm run tauri dev
 ```
-
-## Principles
-
-Privacy comes first. Nothing leaves the machine and all file access is logged. Performance comes second — keep it lightweight and only load the LLM when it is needed.
