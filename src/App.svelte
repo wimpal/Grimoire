@@ -5,6 +5,7 @@
   import Graph from './lib/Graph.svelte';
   import LockScreen from './lib/LockScreen.svelte';
   import PasswordModal from './lib/PasswordModal.svelte';
+  import TemplateModal from './lib/TemplateModal.svelte';
 
   // ── State ──────────────────────────────────────────────────────────────────
 
@@ -51,6 +52,13 @@
   let allTags = $state([]);
   let tagSearch = $state('');
   const TAG_LIMIT = 3;  let tagsOpen = $state(false);
+
+  // Templates
+  let templates = $state([]);
+  let selectedTemplateId = $state(-1); // -1 = Blank (built-in default)
+  let templatesOpen = $state(false);
+  let templateModalOpen = $state(false);
+  let editingTemplate = $state(null); // set to a template object to open the edit modal
   // Tags shown in the sidebar: if searching, filter by prefix match;
   // otherwise show the top TAG_LIMIT by note count.
   let visibleTags = $derived(
@@ -123,6 +131,14 @@
     }
   }
 
+  async function loadTemplates() {
+    try {
+      templates = await invoke('list_templates');
+    } catch (e) {
+      // Non-fatal — picker just shows nothing
+    }
+  }
+
   async function loadNotes() {
     try {
       if (tagFilter) {
@@ -156,6 +172,7 @@
       await loadFolders();
       await loadNotes();
       loadAllTags();
+      loadTemplates();
     }
   });
 
@@ -197,7 +214,8 @@
   // ── Note actions ───────────────────────────────────────────────────────────
 
   async function createNote() {
-    const title = newNoteTitle.trim() || 'Untitled';
+    const template = templates.find(t => t.id === selectedTemplateId);
+    const title = newNoteTitle.trim() || template?.title || 'Untitled';
     try {
       const note = await invoke('create_note', {
         title,
@@ -206,9 +224,17 @@
       newNoteTitle = '';
       await loadNotes();
       openNote(note);
+      // Apply template content after openNote so it overrides the empty content.
+      const templateContent = template?.content ?? '';
+      if (templateContent) {
+        editorContent = templateContent;
+        isDirty = true;
+        // Persist immediately so a force-quit doesn't lose the template content.
+        invoke('update_note', { id: note.id, title, content: templateContent }).catch(() => {});
+      }
       // Index in the background — don't block the UI, but surface failures.
       indexState = 'indexing';
-      invoke('index_note', { noteId: note.id, title: note.title, content: '' })
+      invoke('index_note', { noteId: note.id, title: note.title, content: templateContent })
         .then(() => { indexState = 'idle'; })
         .catch(() => { indexState = 'error'; });
     } catch (e) {
@@ -229,6 +255,33 @@
     invoke('get_note_tags', { noteId: note.id }).then(t => (noteTags = t)).catch(() => {});
     invoke('get_note_links', { noteId: note.id }).then(l => (noteLinks = l)).catch(() => {});
     invoke('get_backlinks', { noteId: note.id }).then(b => (noteBacklinks = b)).catch(() => {});
+  }
+
+  // ── Template actions ───────────────────────────────────────────────────────
+
+  async function saveTemplate(name, title, content) {
+    // Throws on failure so TemplateModal can display the error.
+    await invoke('create_template', { name, title, content });
+    await loadTemplates();
+    templateModalOpen = false;
+  }
+
+  async function updateTemplate(name, title, content) {
+    // Throws on failure so TemplateModal can display the error.
+    await invoke('update_template', { id: editingTemplate.id, name, title, content });
+    await loadTemplates();
+    editingTemplate = null;
+  }
+
+  async function deleteTemplate(id) {
+    try {
+      await invoke('delete_template', { id });
+      await loadTemplates();
+      // Reset picker to Blank if the deleted template was selected.
+      if (selectedTemplateId === id) selectedTemplateId = -1;
+    } catch (e) {
+      showError(e);
+    }
   }
 
   function markDirty() {
@@ -579,6 +632,12 @@
   />
 {/if}
 
+{#if templateModalOpen}
+  <TemplateModal onSave={saveTemplate} onCancel={() => (templateModalOpen = false)} />
+{:else if editingTemplate}
+  <TemplateModal template={editingTemplate} onSave={updateTemplate} onCancel={() => (editingTemplate = null)} />
+{/if}
+
 <div class="layout" style:grid-template-columns={gridCols}>
   <!-- ── Sidebar: Folders ──────────────────────────────────────────── -->
   <aside class="sidebar" class:collapsed={!foldersOpen}>
@@ -677,6 +736,28 @@
           {/if}
         {/if}
       {/if}
+
+      <!-- Templates section -->
+      <div class="sidebar-section-label">
+        <span>Templates</span>
+        <button class="collapse-btn" onclick={() => (templatesOpen = !templatesOpen)} title={templatesOpen ? 'Collapse' : 'Expand'}>
+          {templatesOpen ? '˅' : '›'}
+        </button>
+      </div>
+      {#if templatesOpen}
+        <ul class="template-list">
+          {#each templates as t (t.id)}
+            <li>
+              <span class="template-name">{t.name}</span>
+              {#if !t.builtin}
+                <button class="icon-btn" onclick={() => (editingTemplate = t)} title="Edit template">✎</button>
+                <button class="icon-btn danger" onclick={() => deleteTemplate(t.id)} title="Delete template">✕</button>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+        <button class="vault-btn" onclick={() => (templateModalOpen = true)}>+ New template</button>
+      {/if}
     {:else}
       <button class="collapsed-strip" onclick={() => (foldersOpen = true)} title="Expand folders">
         <span>Folders</span>
@@ -722,6 +803,17 @@
           placeholder="New note…"
           onkeydown={(e) => e.key === 'Enter' && createNote()}
         />
+        {#if templates.length > 1}
+          <select
+            class="template-select"
+            bind:value={selectedTemplateId}
+            title="Template for new note"
+          >
+            {#each templates as t (t.id)}
+              <option value={t.id}>{t.name}</option>
+            {/each}
+          </select>
+        {/if}
         <button onclick={createNote}>+</button>
       </div>
 

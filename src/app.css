@@ -955,3 +955,53 @@ li:hover .icon-btn {
   color: var(--danger);
 }
 
+/* ── Templates ─────────────────────────────────────────────────────── */
+
+/* The template <select> inside .new-item-row (note-list panel). */
+.template-select {
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font: 11px var(--sans);
+  outline: none;
+  cursor: pointer;
+  max-width: 90px;
+}
+
+.template-select:focus {
+  border-color: var(--accent);
+}
+
+/* Template list in the sidebar. */
+.template-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.template-list li {
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  height: 28px;
+}
+
+.template-list li:hover {
+  background: var(--bg3);
+}
+
+.template-list li:hover .icon-btn {
+  opacity: 1;
+}
+
+.template-name {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+

@@ -1248,3 +1248,165 @@ pub async fn seed_notes(
 
     Ok(count)
 }
+
+// ---------------------------------------------------------------------------
+// Templates
+// ---------------------------------------------------------------------------
+
+/// A note template. Built-in templates use negative IDs and are hardcoded here;
+/// user-created templates are stored in SQLite with positive AUTOINCREMENT IDs.
+/// `builtin: true` means the template cannot be deleted.
+#[derive(Debug, Serialize)]
+pub struct Template {
+    pub id: i64,
+    pub name: String,
+    pub title: String,
+    pub content: String,
+    pub builtin: bool,
+}
+
+/// Raw template row from SQLite.
+#[derive(Debug, sqlx::FromRow)]
+struct TemplateRow {
+    id: i64,
+    name: String,
+    title: String,
+    content: String,
+}
+
+/// The hardcoded built-in templates returned alongside user-created ones.
+/// Negative IDs ensure they never clash with SQLite AUTOINCREMENT values.
+fn builtin_templates() -> Vec<Template> {
+    vec![
+        Template {
+            id: -1,
+            name: "Blank".to_string(),
+            title: String::new(),
+            content: String::new(),
+            builtin: true,
+        },
+        Template {
+            id: -2,
+            name: "Meeting Notes".to_string(),
+            title: "Meeting Notes".to_string(),
+            content: "# Meeting Notes\n\n**Date:** \n**Attendees:** \n\n## Agenda\n\n- \n\n## Notes\n\n## Action Items\n\n- [ ] ".to_string(),
+            builtin: true,
+        },
+        Template {
+            id: -3,
+            name: "Daily Journal".to_string(),
+            title: "Journal".to_string(),
+            content: "# \n\n**Mood:** \n**Energy:** \n\n## Today\n\n## Goals\n\n- ".to_string(),
+            builtin: true,
+        },
+        Template {
+            id: -4,
+            name: "Book Notes".to_string(),
+            title: "Book Notes".to_string(),
+            content: "# \n\n**Author:** \n\n## Key Ideas\n\n## Quotes\n\n## Takeaways\n\n".to_string(),
+            builtin: true,
+        },
+    ]
+}
+
+/// Return all templates: built-ins first, then user-created ones from SQLite.
+#[tauri::command]
+pub async fn list_templates(pool: State<'_, SqlitePool>) -> Result<Vec<Template>, String> {
+    let rows = sqlx::query_as::<_, TemplateRow>(
+        "SELECT id, name, title, content FROM templates ORDER BY name ASC",
+    )
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let mut result = builtin_templates();
+    result.extend(rows.into_iter().map(|r| Template {
+        id: r.id,
+        name: r.name,
+        title: r.title,
+        content: r.content,
+        builtin: false,
+    }));
+
+    Ok(result)
+}
+
+/// Create a new user-defined template and return it.
+#[tauri::command]
+pub async fn create_template(
+    pool: State<'_, SqlitePool>,
+    name: String,
+    title: String,
+    content: String,
+) -> Result<Template, String> {
+    let row = sqlx::query_as::<_, TemplateRow>(
+        "INSERT INTO templates (name, title, content) VALUES (?, ?, ?)
+         RETURNING id, name, title, content",
+    )
+    .bind(&name)
+    .bind(&title)
+    .bind(&content)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(Template {
+        id: row.id,
+        name: row.name,
+        title: row.title,
+        content: row.content,
+        builtin: false,
+    })
+}
+
+/// Update a user-created template's name, title, and content.
+/// Returns an error if `id` is negative (built-in templates cannot be edited).
+#[tauri::command]
+pub async fn update_template(
+    pool: State<'_, SqlitePool>,
+    id: i64,
+    name: String,
+    title: String,
+    content: String,
+) -> Result<Template, String> {
+    if id <= 0 {
+        return Err("Built-in templates cannot be edited.".to_string());
+    }
+
+    let row = sqlx::query_as::<_, TemplateRow>(
+        "UPDATE templates SET name = ?, title = ?, content = ? WHERE id = ?
+         RETURNING id, name, title, content",
+    )
+    .bind(&name)
+    .bind(&title)
+    .bind(&content)
+    .bind(id)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(Template {
+        id: row.id,
+        name: row.name,
+        title: row.title,
+        content: row.content,
+        builtin: false,
+    })
+}
+
+/// Delete a user-created template by id.
+/// Returns an error if `id` is negative (built-in templates cannot be deleted).
+#[tauri::command]
+pub async fn delete_template(pool: State<'_, SqlitePool>, id: i64) -> Result<(), String> {
+    if id <= 0 {
+        return Err("Built-in templates cannot be deleted.".to_string());
+    }
+
+    sqlx::query("DELETE FROM templates WHERE id = ?")
+        .bind(id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}

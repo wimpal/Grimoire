@@ -13,9 +13,9 @@
     "windows": [
       {
         "title": "Grimoire",
-        "width": 1280,
-        "height": 720,
-        "minWidth": 640,
+        "width": 1440,
+        "height": 860,
+        "minWidth": 800,
         "resizable": true,
         "fullscreen": false
       }
