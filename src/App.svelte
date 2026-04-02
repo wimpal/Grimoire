@@ -6,6 +6,8 @@
   import LockScreen from './lib/LockScreen.svelte';
   import PasswordModal from './lib/PasswordModal.svelte';
   import TemplateModal from './lib/TemplateModal.svelte';
+  import NoteProperties from './lib/NoteProperties.svelte';
+  import DatabaseView from './lib/DatabaseView.svelte';
 
   // ── State ──────────────────────────────────────────────────────────────────
 
@@ -59,6 +61,12 @@
   let templatesOpen = $state(false);
   let templateModalOpen = $state(false);
   let editingTemplate = $state(null); // set to a template object to open the edit modal
+
+  // Database / table view
+  let tableViewOpen = $state(false);
+  let folderHasProperties = $state(false); // true when the selected folder has any property defs
+  let noteProperties = $state([]); // properties for the active note (for RAG suffix)
+  let propertiesReady = $state(true); // false while NoteProperties is fetching, to prevent layout shift
   // Tags shown in the sidebar: if searching, filter by prefix match;
   // otherwise show the top TAG_LIMIT by note count.
   let visibleTags = $derived(
@@ -208,7 +216,16 @@
     selectedFolderId = id;
     tagFilter = null;
     activeNote = null;
+    tableViewOpen = false;
     await loadNotes();
+    // Check if this folder has property definitions (for the table view toggle).
+    if (id && id !== 'all') {
+      invoke('get_property_defs', { folderId: id })
+        .then(defs => { folderHasProperties = defs.length > 0; })
+        .catch(() => { folderHasProperties = false; });
+    } else {
+      folderHasProperties = false;
+    }
   }
 
   // ── Note actions ───────────────────────────────────────────────────────────
@@ -223,6 +240,15 @@
       });
       newNoteTitle = '';
       await loadNotes();
+      // Apply template property defs to the folder AND seed initial note_properties
+      // rows for this note — BEFORE openNote so NoteProperties loads correctly on first mount.
+      const fid = selectedFolderId === 'all' ? null : (selectedFolderId ?? null);
+      if (fid && selectedTemplateId > 0) {
+        try {
+          const defs = await invoke('apply_template_to_note', { noteId: note.id, folderId: fid, templateId: selectedTemplateId });
+          folderHasProperties = defs.length > 0;
+        } catch { /* non-fatal */ }
+      }
       openNote(note);
       // Apply template content after openNote so it overrides the empty content.
       const templateContent = template?.content ?? '';
@@ -249,6 +275,9 @@
     editorTitle = note.title;
     editorContent = note.content;
     isDirty = false;
+    // If the note is in a folder, hold the textarea until the properties panel
+    // has loaded — prevents the content jumping down as properties appear.
+    propertiesReady = !note.folder_id;
     noteTags = [];
     noteLinks = [];
     noteBacklinks = [];
@@ -259,16 +288,16 @@
 
   // ── Template actions ───────────────────────────────────────────────────────
 
-  async function saveTemplate(name, title, content) {
+  async function saveTemplate(name, title, content, properties) {
     // Throws on failure so TemplateModal can display the error.
-    await invoke('create_template', { name, title, content });
+    await invoke('create_template', { name, title, content, properties });
     await loadTemplates();
     templateModalOpen = false;
   }
 
-  async function updateTemplate(name, title, content) {
+  async function updateTemplate(name, title, content, properties) {
     // Throws on failure so TemplateModal can display the error.
-    await invoke('update_template', { id: editingTemplate.id, name, title, content });
+    await invoke('update_template', { id: editingTemplate.id, name, title, content, properties });
     await loadTemplates();
     editingTemplate = null;
   }
@@ -857,6 +886,11 @@
           <button onclick={saveNote} disabled={!isDirty} class:index-error={!isDirty && indexState === 'error'}>
             {isDirty ? 'Save (Ctrl+S)' : indexState === 'indexing' ? 'Indexing…' : indexState === 'error' ? '⚠ Index failed' : 'Saved'}
           </button>
+          {#if folderHasProperties}
+            <button class="graph-toggle" onclick={() => { if (isDirty) saveNote(); activeNote = null; tableViewOpen = true; }}>
+              ← Table
+            </button>
+          {/if}
           <button class="graph-toggle" onclick={() => (graphOpen = !graphOpen)}>
             {graphOpen ? '✕ Graph' : 'Graph'}
           </button>
@@ -872,13 +906,24 @@
           {/each}
         </div>
       {/if}
-      <textarea
-        class="content-area"
-        bind:value={editorContent}
-        oninput={markDirty}
-        onkeydown={handleEditorKeydown}
-        placeholder="Write your note…"
-      ></textarea>
+      {#if activeNote.folder_id}
+        {#key activeNote.id}
+          <NoteProperties
+            noteId={activeNote.id}
+            folderId={activeNote.folder_id}
+            onPropertiesLoad={(p) => { noteProperties = p; folderHasProperties = p.length > 0 || folderHasProperties; propertiesReady = true; }}
+          />
+        {/key}
+      {/if}
+      {#if propertiesReady}
+        <textarea
+          class="content-area"
+          bind:value={editorContent}
+          oninput={markDirty}
+          onkeydown={handleEditorKeydown}
+          placeholder="Write your note…"
+        ></textarea>
+      {/if}
       {#if noteLinks.length > 0 || noteBacklinks.length > 0}
         <div class="note-footer">
           {#if noteLinks.length > 0}
@@ -902,6 +947,11 @@
     {:else}
       <div class="editor-toolbar">
         <div class="toolbar-actions">
+          {#if folderHasProperties && selectedFolderId && selectedFolderId !== 'all'}
+            <button class="graph-toggle" onclick={() => (tableViewOpen = !tableViewOpen)}>
+              {tableViewOpen ? '✕ Table' : 'Table'}
+            </button>
+          {/if}
           <button class="graph-toggle" onclick={() => (graphOpen = !graphOpen)}>
             {graphOpen ? '✕ Graph' : 'Graph'}
           </button>
@@ -910,7 +960,14 @@
           </button>
         </div>
       </div>
-      <div class="empty-editor">Select or create a note</div>
+      {#if tableViewOpen && selectedFolderId && selectedFolderId !== 'all'}
+        <DatabaseView
+          folderId={selectedFolderId}
+          onOpenNote={(id) => openNoteById(id)}
+        />
+      {:else}
+        <div class="empty-editor">Select or create a note</div>
+      {/if}
     {/if}
   </main>
 

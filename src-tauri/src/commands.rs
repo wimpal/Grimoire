@@ -691,20 +691,67 @@ fn chunk_sentences(sentences: Vec<String>, per_chunk: usize, overlap: usize) -> 
     chunks
 }
 
+/// Build a "Properties: key=value, …" suffix for a note, to be appended to
+/// the note content before embedding. Returns an empty string if the note has
+/// no properties or no folder.
+async fn build_properties_suffix(pool: &SqlitePool, note_id: i64) -> String {
+    #[derive(sqlx::FromRow)]
+    struct PV {
+        name: String,
+        value: String,
+    }
+
+    let pairs: Vec<PV> = sqlx::query_as(
+        "SELECT pd.name, COALESCE(np.value, '') AS value
+         FROM property_defs pd
+         LEFT JOIN note_properties np ON np.def_id = pd.id AND np.note_id = ?
+         WHERE pd.folder_id = (SELECT folder_id FROM notes WHERE id = ?)
+         ORDER BY pd.position ASC",
+    )
+    .bind(note_id)
+    .bind(note_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let filled: Vec<String> = pairs
+        .into_iter()
+        .filter(|p| !p.value.is_empty())
+        .map(|p| format!("{}={}", p.name, p.value))
+        .collect();
+
+    if filled.is_empty() {
+        String::new()
+    } else {
+        format!("\nProperties: {}", filled.join(", "))
+    }
+}
+
 /// Embed a note and store it in the vector index.
 /// The note content is split into sentences, then grouped into overlapping
 /// 3-sentence chunks. Each chunk is embedded on its own content alone —
 /// the title is intentionally excluded from the embedding so that off-topic
 /// sentences in a note (e.g. a random thought at the end of a technical note)
 /// still produce vectors that match unrelated queries.
+///
+/// Property values are appended as a suffix so the LLM can answer queries
+/// like "which notes are due this week?" via vector search.
 #[tauri::command]
 pub async fn index_note(
+    pool: State<'_, SqlitePool>,
     vdb: State<'_, crate::vector::VectorDb>,
     note_id: i64,
     title: String,
     content: String,
 ) -> Result<(), String> {
-    let sentences = split_sentences(&content);
+    let props_suffix = build_properties_suffix(pool.inner(), note_id).await;
+    let full_content = if props_suffix.is_empty() {
+        content
+    } else {
+        format!("{content}{props_suffix}")
+    };
+
+    let sentences = split_sentences(&full_content);
     let raw_chunks = chunk_sentences(sentences, 1, 0);
 
     let mut chunks: Vec<(i32, String, Vec<f32>)> = Vec::new();
@@ -795,7 +842,14 @@ pub async fn reindex_all(
         if note.locked {
             continue;
         }
-        let sentences = split_sentences(&note.content);
+        // Append property values so the LLM can search by metadata.
+        let props_suffix = build_properties_suffix(pool.inner(), note.id).await;
+        let full_content = if props_suffix.is_empty() {
+            note.content.clone()
+        } else {
+            format!("{}{props_suffix}", note.content)
+        };
+        let sentences = split_sentences(&full_content);
         let raw_chunks = chunk_sentences(sentences, 1, 0);
         let mut chunks: Vec<(i32, String, Vec<f32>)> = Vec::new();
         for (i, chunk_text) in raw_chunks.into_iter().enumerate() {
@@ -1253,9 +1307,21 @@ pub async fn seed_notes(
 // Templates
 // ---------------------------------------------------------------------------
 
+/// A single property spec carried by a template.
+/// When a note is created from a template in a folder, each spec is inserted
+/// into property_defs for that folder (INSERT OR IGNORE — existing columns
+/// with the same name are left unchanged).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TemplatePropertySpec {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub r#type: String,
+    pub options: Option<String>, // JSON array string, only for 'select' type
+}
+
 /// A note template. Built-in templates use negative IDs and are hardcoded here;
 /// user-created templates are stored in SQLite with positive AUTOINCREMENT IDs.
-/// `builtin: true` means the template cannot be deleted.
+/// `builtin: true` means the template cannot be deleted or edited.
 #[derive(Debug, Serialize)]
 pub struct Template {
     pub id: i64,
@@ -1263,6 +1329,9 @@ pub struct Template {
     pub title: String,
     pub content: String,
     pub builtin: bool,
+    /// Seed property definitions carried by this template.
+    /// Empty for built-in templates.
+    pub properties: Vec<TemplatePropertySpec>,
 }
 
 /// Raw template row from SQLite.
@@ -1272,6 +1341,13 @@ struct TemplateRow {
     name: String,
     title: String,
     content: String,
+    properties: String, // JSON, e.g. '[{"name":"Status","type":"select","options":"[\"Draft\",\"Done\"]"}]'
+}
+
+impl TemplateRow {
+    fn parse_properties(&self) -> Vec<TemplatePropertySpec> {
+        serde_json::from_str(&self.properties).unwrap_or_default()
+    }
 }
 
 /// The hardcoded built-in templates returned alongside user-created ones.
@@ -1284,6 +1360,7 @@ fn builtin_templates() -> Vec<Template> {
             title: String::new(),
             content: String::new(),
             builtin: true,
+            properties: vec![],
         },
         Template {
             id: -2,
@@ -1291,6 +1368,7 @@ fn builtin_templates() -> Vec<Template> {
             title: "Meeting Notes".to_string(),
             content: "# Meeting Notes\n\n**Date:** \n**Attendees:** \n\n## Agenda\n\n- \n\n## Notes\n\n## Action Items\n\n- [ ] ".to_string(),
             builtin: true,
+            properties: vec![],
         },
         Template {
             id: -3,
@@ -1298,6 +1376,7 @@ fn builtin_templates() -> Vec<Template> {
             title: "Journal".to_string(),
             content: "# \n\n**Mood:** \n**Energy:** \n\n## Today\n\n## Goals\n\n- ".to_string(),
             builtin: true,
+            properties: vec![],
         },
         Template {
             id: -4,
@@ -1305,6 +1384,7 @@ fn builtin_templates() -> Vec<Template> {
             title: "Book Notes".to_string(),
             content: "# \n\n**Author:** \n\n## Key Ideas\n\n## Quotes\n\n## Takeaways\n\n".to_string(),
             builtin: true,
+            properties: vec![],
         },
     ]
 }
@@ -1313,19 +1393,23 @@ fn builtin_templates() -> Vec<Template> {
 #[tauri::command]
 pub async fn list_templates(pool: State<'_, SqlitePool>) -> Result<Vec<Template>, String> {
     let rows = sqlx::query_as::<_, TemplateRow>(
-        "SELECT id, name, title, content FROM templates ORDER BY name ASC",
+        "SELECT id, name, title, content, properties FROM templates ORDER BY name ASC",
     )
     .fetch_all(pool.inner())
     .await
     .map_err(|e| e.to_string())?;
 
     let mut result = builtin_templates();
-    result.extend(rows.into_iter().map(|r| Template {
-        id: r.id,
-        name: r.name,
-        title: r.title,
-        content: r.content,
-        builtin: false,
+    result.extend(rows.into_iter().map(|r| {
+        let properties = r.parse_properties();
+        Template {
+            id: r.id,
+            name: r.name,
+            title: r.title,
+            content: r.content,
+            builtin: false,
+            properties,
+        }
     }));
 
     Ok(result)
@@ -1338,28 +1422,35 @@ pub async fn create_template(
     name: String,
     title: String,
     content: String,
+    properties: Vec<TemplatePropertySpec>,
 ) -> Result<Template, String> {
+    let props_json = serde_json::to_string(&properties)
+        .map_err(|e| format!("Failed to serialize properties: {e}"))?;
+
     let row = sqlx::query_as::<_, TemplateRow>(
-        "INSERT INTO templates (name, title, content) VALUES (?, ?, ?)
-         RETURNING id, name, title, content",
+        "INSERT INTO templates (name, title, content, properties) VALUES (?, ?, ?, ?)
+         RETURNING id, name, title, content, properties",
     )
     .bind(&name)
     .bind(&title)
     .bind(&content)
+    .bind(&props_json)
     .fetch_one(pool.inner())
     .await
     .map_err(|e| e.to_string())?;
 
+    let props = row.parse_properties();
     Ok(Template {
         id: row.id,
         name: row.name,
         title: row.title,
         content: row.content,
         builtin: false,
+        properties: props,
     })
 }
 
-/// Update a user-created template's name, title, and content.
+/// Update a user-created template's name, title, content, and property specs.
 /// Returns an error if `id` is negative (built-in templates cannot be edited).
 #[tauri::command]
 pub async fn update_template(
@@ -1368,29 +1459,36 @@ pub async fn update_template(
     name: String,
     title: String,
     content: String,
+    properties: Vec<TemplatePropertySpec>,
 ) -> Result<Template, String> {
     if id <= 0 {
         return Err("Built-in templates cannot be edited.".to_string());
     }
 
+    let props_json = serde_json::to_string(&properties)
+        .map_err(|e| format!("Failed to serialize properties: {e}"))?;
+
     let row = sqlx::query_as::<_, TemplateRow>(
-        "UPDATE templates SET name = ?, title = ?, content = ? WHERE id = ?
-         RETURNING id, name, title, content",
+        "UPDATE templates SET name = ?, title = ?, content = ?, properties = ? WHERE id = ?
+         RETURNING id, name, title, content, properties",
     )
     .bind(&name)
     .bind(&title)
     .bind(&content)
+    .bind(&props_json)
     .bind(id)
     .fetch_one(pool.inner())
     .await
     .map_err(|e| e.to_string())?;
 
+    let props = row.parse_properties();
     Ok(Template {
         id: row.id,
         name: row.name,
         title: row.title,
         content: row.content,
         builtin: false,
+        properties: props,
     })
 }
 
@@ -1409,4 +1507,376 @@ pub async fn delete_template(pool: State<'_, SqlitePool>, id: i64) -> Result<(),
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+/// Apply a template's property specs to a specific note.
+/// For each spec:
+///   1. INSERT OR IGNORE the def into the folder schema (so the database/table
+///      view has a column for it).
+///   2. INSERT OR IGNORE an empty note_properties row for this note specifically,
+///      so the note's properties panel shows it immediately.
+/// Blank notes created without a template are never touched and remain property-free.
+#[tauri::command]
+pub async fn apply_template_to_note(
+    pool: State<'_, SqlitePool>,
+    note_id: i64,
+    folder_id: i64,
+    template_id: i64,
+) -> Result<Vec<PropertyDef>, String> {
+    // Built-in templates (negative IDs) carry no property specs — nothing to do.
+    if template_id <= 0 {
+        return get_property_defs(pool, folder_id).await;
+    }
+
+    let row: Option<TemplateRow> = sqlx::query_as(
+        "SELECT id, name, title, content, properties FROM templates WHERE id = ?",
+    )
+    .bind(template_id)
+    .fetch_optional(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let specs = row.map(|r| r.parse_properties()).unwrap_or_default();
+
+    for spec in &specs {
+        if !["text", "number", "date", "boolean", "select"].contains(&spec.r#type.as_str()) {
+            continue; // skip malformed specs silently
+        }
+
+        // Get current max position so the new def lands at the end.
+        let max_pos: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(position) FROM property_defs WHERE folder_id = ?",
+        )
+        .bind(folder_id)
+        .fetch_one(pool.inner())
+        .await
+        .unwrap_or(None);
+
+        let position = max_pos.unwrap_or(-1) + 1;
+
+        // INSERT OR IGNORE: if a def with this name already exists, leave it untouched.
+        sqlx::query(
+            "INSERT OR IGNORE INTO property_defs (folder_id, name, type, options, position)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(folder_id)
+        .bind(&spec.name)
+        .bind(&spec.r#type)
+        .bind(&spec.options)
+        .bind(position)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+        // Find the def id (just inserted or pre-existing).
+        let def_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM property_defs WHERE folder_id = ? AND name = ?",
+        )
+        .bind(folder_id)
+        .bind(&spec.name)
+        .fetch_one(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+        // Seed an empty note_properties row so this note "owns" the property.
+        sqlx::query(
+            "INSERT OR IGNORE INTO note_properties (note_id, def_id, value) VALUES (?, ?, '')",
+        )
+        .bind(note_id)
+        .bind(def_id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+
+    get_property_defs(pool, folder_id).await
+}
+
+// ---------------------------------------------------------------------------
+// Note properties / databases
+// ---------------------------------------------------------------------------
+
+/// A property definition — one per "column" in a folder's database schema.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct PropertyDef {
+    pub id: i64,
+    pub folder_id: Option<i64>,
+    pub name: String,
+    #[sqlx(rename = "type")]
+    #[serde(rename = "type")]
+    pub r#type: String,
+    pub options: Option<String>,  // JSON array, only for 'select' type
+    pub position: i64,
+}
+
+/// A single property value attached to a note.
+/// Denormalised: includes the def's name, type, and options so the frontend
+/// can render the correct input without a second round-trip.
+/// `value` is `None` when the note has no row for this property (LEFT JOIN miss
+/// in the table view) and `Some(...)` when the note owns the property.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct NoteProperty {
+    pub def_id: i64,
+    pub name: String,
+    #[sqlx(rename = "type")]
+    #[serde(rename = "type")]
+    pub r#type: String,
+    pub options: Option<String>,
+    pub value: Option<String>,
+}
+
+/// Return all property definitions for a folder, ordered by position.
+#[tauri::command]
+pub async fn get_property_defs(
+    pool: State<'_, SqlitePool>,
+    folder_id: i64,
+) -> Result<Vec<PropertyDef>, String> {
+    let defs = sqlx::query_as::<_, PropertyDef>(
+        "SELECT id, folder_id, name, type, options, position
+         FROM property_defs
+         WHERE folder_id = ?
+         ORDER BY position ASC, id ASC",
+    )
+    .bind(folder_id)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(defs)
+}
+
+/// Create a new property definition for a folder and return it.
+#[tauri::command]
+pub async fn create_property_def(
+    pool: State<'_, SqlitePool>,
+    folder_id: i64,
+    name: String,
+    r#type: String,
+    options: Option<String>,
+) -> Result<PropertyDef, String> {
+    // Validate type
+    if !["text", "number", "date", "boolean", "select"].contains(&r#type.as_str()) {
+        return Err(format!("Invalid property type: {}", r#type));
+    }
+
+    // Auto-assign position as max+1
+    let max_pos: Option<i64> = sqlx::query_scalar(
+        "SELECT MAX(position) FROM property_defs WHERE folder_id = ?",
+    )
+    .bind(folder_id)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let position = max_pos.unwrap_or(-1) + 1;
+
+    let def = sqlx::query_as::<_, PropertyDef>(
+        "INSERT INTO property_defs (folder_id, name, type, options, position)
+         VALUES (?, ?, ?, ?, ?)
+         RETURNING id, folder_id, name, type, options, position",
+    )
+    .bind(folder_id)
+    .bind(&name)
+    .bind(&r#type)
+    .bind(&options)
+    .bind(position)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(def)
+}
+
+/// Update a property definition (name, type, options).
+#[tauri::command]
+pub async fn update_property_def(
+    pool: State<'_, SqlitePool>,
+    id: i64,
+    name: String,
+    r#type: String,
+    options: Option<String>,
+) -> Result<PropertyDef, String> {
+    if !["text", "number", "date", "boolean", "select"].contains(&r#type.as_str()) {
+        return Err(format!("Invalid property type: {}", r#type));
+    }
+
+    let def = sqlx::query_as::<_, PropertyDef>(
+        "UPDATE property_defs SET name = ?, type = ?, options = ? WHERE id = ?
+         RETURNING id, folder_id, name, type, options, position",
+    )
+    .bind(&name)
+    .bind(&r#type)
+    .bind(&options)
+    .bind(id)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(def)
+}
+
+/// Delete a property definition. Cascades to all note_properties rows.
+#[tauri::command]
+pub async fn delete_property_def(pool: State<'_, SqlitePool>, id: i64) -> Result<(), String> {
+    sqlx::query("DELETE FROM property_defs WHERE id = ?")
+        .bind(id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Reorder a property definition to a new position.
+/// Shifts other defs in the same folder to make room.
+#[tauri::command]
+pub async fn reorder_property_def(
+    pool: State<'_, SqlitePool>,
+    id: i64,
+    new_position: i64,
+) -> Result<(), String> {
+    // Get the def's folder_id so we can reorder within that folder.
+    let folder_id: i64 = sqlx::query_scalar(
+        "SELECT folder_id FROM property_defs WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Shift everything at or after the target position up by 1.
+    sqlx::query(
+        "UPDATE property_defs
+         SET position = position + 1
+         WHERE folder_id = ? AND position >= ?",
+    )
+    .bind(folder_id)
+    .bind(new_position)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Place our def at the target position.
+    sqlx::query("UPDATE property_defs SET position = ? WHERE id = ?")
+        .bind(new_position)
+        .bind(id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// Return property values for a note — only defs for which an explicit
+/// note_properties row exists (INNER JOIN). Notes that have never had a
+/// property set will return an empty list, keeping blank notes clean.
+#[tauri::command]
+pub async fn get_note_properties(
+    pool: State<'_, SqlitePool>,
+    note_id: i64,
+) -> Result<Vec<NoteProperty>, String> {
+    let props = sqlx::query_as::<_, NoteProperty>(
+        "SELECT pd.id AS def_id, pd.name, pd.type, pd.options, np.value
+         FROM note_properties np
+         INNER JOIN property_defs pd ON pd.id = np.def_id
+         WHERE np.note_id = ?
+         ORDER BY pd.position ASC, pd.id ASC",
+    )
+    .bind(note_id)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(props)
+}
+
+/// Set (upsert) a single property value for a note.
+#[tauri::command]
+pub async fn set_note_property(
+    pool: State<'_, SqlitePool>,
+    note_id: i64,
+    def_id: i64,
+    value: String,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO note_properties (note_id, def_id, value) VALUES (?, ?, ?)
+         ON CONFLICT(note_id, def_id) DO UPDATE SET value = excluded.value",
+    )
+    .bind(note_id)
+    .bind(def_id)
+    .bind(&value)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Return all notes in a folder with their property values, formatted for the
+/// table/database view. Returns a list of objects, each containing the note
+/// plus a map of def_id → value.
+#[derive(Debug, Serialize)]
+pub struct NoteWithProperties {
+    pub id: i64,
+    pub title: String,
+    pub folder_id: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub properties: Vec<NoteProperty>,
+}
+
+#[tauri::command]
+pub async fn list_notes_with_properties(
+    pool: State<'_, SqlitePool>,
+    keys: State<'_, KeyStore>,
+    folder_id: i64,
+) -> Result<Vec<NoteWithProperties>, String> {
+    // Fetch notes in the folder.
+    let rows = sqlx::query_as::<_, NoteRow>(
+        "SELECT id, title, content, folder_id, created_at, updated_at
+         FROM notes WHERE folder_id = ? ORDER BY updated_at DESC",
+    )
+    .bind(folder_id)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let folder_locked = {
+        let v: i64 = sqlx::query_scalar("SELECT locked FROM folders WHERE id = ?")
+            .bind(folder_id)
+            .fetch_optional(pool.inner())
+            .await
+            .map_err(|e| e.to_string())?
+            .unwrap_or(0);
+        v != 0
+    };
+
+    // Build per-note property values.
+    let mut result = Vec::new();
+    for row in rows {
+        let note = map_note_row(row, folder_locked, &keys);
+        if note.locked {
+            continue;
+        }
+
+        let props = sqlx::query_as::<_, NoteProperty>(
+            "SELECT pd.id AS def_id, pd.name, pd.type, pd.options, np.value
+             FROM property_defs pd
+             LEFT JOIN note_properties np ON np.def_id = pd.id AND np.note_id = ?
+             WHERE pd.folder_id = ?
+             ORDER BY pd.position ASC, pd.id ASC",
+        )
+        .bind(note.id)
+        .bind(folder_id)
+        .fetch_all(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+        result.push(NoteWithProperties {
+            id: note.id,
+            title: note.title,
+            folder_id: note.folder_id,
+            created_at: note.created_at,
+            updated_at: note.updated_at,
+            properties: props,
+        });
+    }
+
+    Ok(result)
 }

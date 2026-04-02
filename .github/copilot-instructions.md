@@ -5,6 +5,7 @@
 - If asked for something but there is a significantly better option, say so before doing it.
 - When fixing something, actually fix it. Do not claim something is fixed if it is not.
 - Communicate clearly and concisely.
+- When I ask you to implement something, but you notice that you are set on ask mode, notify me that you are in ask mode and ask if I want you to switch to do mode to implement the feature. Do not implement the feature while in ask mode.
 
 ## Teaching & Explanation
 - The developer is new to this tech stack (Rust, Tauri, SQLite, LanceDB, Ollama, Svelte). Assume unfamiliarity with concepts unless demonstrated otherwise.

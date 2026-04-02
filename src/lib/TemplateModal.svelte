@@ -3,32 +3,70 @@
    * TemplateModal — modal for creating or editing a user-defined template.
    *
    * Props:
-   *   onSave(name, title, content)  — called when the form is submitted
-   *   onCancel                      — called when the modal is dismissed
-   *   template                      — optional; when provided, the modal opens in edit mode
-   *                                   pre-filled with the template's current values
+   *   onSave(name, title, content, properties)  — called when the form is submitted
+   *   onCancel                                  — called when the modal is dismissed
+   *   template                                  — optional; edit mode pre-fills all fields
    */
+  import { untrack } from 'svelte';
 
   let { onSave, onCancel, template = null } = $props();
 
-  let name    = $state(template?.name    ?? '');
-  let title   = $state(template?.title   ?? '');
-  let content = $state(template?.content ?? '');
+  // untrack: this modal mounts fresh each open, so capturing the initial prop value is intentional.
+  let name    = $state(untrack(() => template?.name    ?? ''));
+  let title   = $state(untrack(() => template?.title   ?? ''));
+  let content = $state(untrack(() => template?.content ?? ''));
+  // Each property spec is { name, type, options } — options is a comma-separated string in the UI,
+  // stored as a JSON array string when sent to Rust.
+  let templateProps = $state(
+    untrack(() =>
+      (template?.properties ?? []).map(p => ({
+        name: p.name,
+        type: p.type,
+        options: p.options
+          ? JSON.parse(p.options).join(', ')
+          : '',
+      }))
+    )
+  );
   let loading = $state(false);
   let error   = $state('');
 
-  const isEditing = template !== null;
+  const isEditing = $derived(template !== null);
 
   $effect(() => {
     document.getElementById('tmpl-modal-name')?.focus();
   });
+
+  function addProp() {
+    templateProps = [...templateProps, { name: '', type: 'text', options: '' }];
+  }
+
+  function removeProp(i) {
+    templateProps = templateProps.filter((_, idx) => idx !== i);
+  }
+
+  function updateProp(i, field, value) {
+    templateProps = templateProps.map((p, idx) =>
+      idx === i ? { ...p, [field]: value } : p
+    );
+  }
 
   async function submit() {
     if (!name.trim()) return;
     loading = true;
     error = '';
     try {
-      await onSave(name.trim(), title.trim(), content);
+      // Convert UI comma-separated options back to JSON array strings for Rust.
+      const properties = templateProps
+        .filter(p => p.name.trim())
+        .map(p => ({
+          name: p.name.trim(),
+          type: p.type,
+          options: p.type === 'select' && p.options.trim()
+            ? JSON.stringify(p.options.split(',').map(s => s.trim()).filter(Boolean))
+            : null,
+        }));
+      await onSave(name.trim(), title.trim(), content, properties);
     } catch (e) {
       error = String(e);
     } finally {
@@ -73,10 +111,60 @@
       <textarea
         bind:value={content}
         placeholder="Template body…"
-        rows="8"
+        rows="6"
         disabled={loading}
       ></textarea>
     </label>
+
+    <!-- Property definitions -->
+    <div class="props-section">
+      <span class="props-section-label">Properties</span>
+      {#if templateProps.length > 0}
+        <div class="props-list">
+          {#each templateProps as prop, i}
+            <div class="prop-spec-row">
+              <input
+                type="text"
+                class="prop-spec-input"
+                value={prop.name}
+                oninput={(e) => updateProp(i, 'name', e.currentTarget.value)}
+                placeholder="Name"
+                disabled={loading}
+              />
+              <select
+                class="prop-spec-input prop-spec-type"
+                value={prop.type}
+                onchange={(e) => updateProp(i, 'type', e.currentTarget.value)}
+                disabled={loading}
+              >
+                <option value="text">Text</option>
+                <option value="number">Number</option>
+                <option value="date">Date</option>
+                <option value="boolean">Checkbox</option>
+                <option value="select">Select</option>
+              </select>
+              {#if prop.type === 'select'}
+                <input
+                  type="text"
+                  class="prop-spec-input prop-spec-options"
+                  value={prop.options}
+                  oninput={(e) => updateProp(i, 'options', e.currentTarget.value)}
+                  placeholder="Options (comma-separated)"
+                  disabled={loading}
+                />
+              {/if}
+              <button
+                class="prop-spec-delete"
+                onclick={() => removeProp(i)}
+                disabled={loading}
+                title="Remove"
+              >✕</button>
+            </div>
+          {/each}
+        </div>
+      {/if}
+      <button class="prop-spec-add" onclick={addProp} disabled={loading}>+ Add property</button>
+    </div>
 
     {#if error}
       <p class="modal-error">{error}</p>
@@ -114,7 +202,9 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
-    width: 400px;
+    width: 480px;
+    max-height: 90vh;
+    overflow-y: auto;
   }
 
   .modal-title {
@@ -215,5 +305,88 @@
   .modal-cancel:disabled {
     opacity: 0.5;
     cursor: default;
+  }
+
+  /* ── Property spec editor ─────────────────────────────────────────── */
+
+  .props-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .props-section-label {
+    font: 12px var(--sans);
+    color: var(--text);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .props-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .prop-spec-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .prop-spec-input {
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    background: var(--bg2);
+    color: var(--text-h);
+    font: 12px var(--sans);
+    border-radius: 4px;
+    outline: none;
+    box-sizing: border-box;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .prop-spec-input:focus {
+    border-color: var(--accent);
+  }
+
+  .prop-spec-type {
+    flex: 0 0 auto;
+    width: 100px;
+  }
+
+  .prop-spec-options {
+    flex: 1.5;
+  }
+
+  .prop-spec-delete {
+    background: none;
+    border: none;
+    color: var(--text);
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 5px;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+
+  .prop-spec-delete:hover {
+    color: var(--danger);
+    background: rgba(229, 62, 62, 0.1);
+  }
+
+  .prop-spec-add {
+    align-self: flex-start;
+    background: none;
+    border: none;
+    padding: 2px 0;
+    font: 12px var(--sans);
+    color: var(--text);
+    cursor: pointer;
+  }
+
+  .prop-spec-add:hover {
+    color: var(--accent);
   }
 </style>
