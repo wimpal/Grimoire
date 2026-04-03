@@ -143,14 +143,16 @@
 
   // Compute grid column widths reactively from all panel states.
   // $derived re-evaluates automatically whenever any of its dependencies change.
-  let gridCols = $derived(
-    [
-      foldersOpen ? '200px' : '28px',
-      notesOpen ? '240px' : '28px',
+  // Spellbook mode uses narrower left panels and a wider chat for better book proportions.
+  let gridCols = $derived.by(() => {
+    const sb = theme === 'spellbook';
+    return [
+      foldersOpen ? (sb ? '170px' : '200px') : '28px',
+      notesOpen   ? (sb ? '200px' : '240px') : '28px',
       '1fr',
-      ...(chatOpen ? ['360px'] : []),
-    ].join(' ')
-  );
+      ...(chatOpen ? [sb ? '440px' : '360px'] : []),
+    ].join(' ');
+  });
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -1027,6 +1029,7 @@
     <button class="graph-close" onclick={() => (graphOpen = false)}>✕ Close</button>
     <Graph
       activeNoteId={activeNote?.id ?? null}
+      {theme}
       onSelectNote={(id) => {
         invoke('get_note', { id })
           .then(note => { openNote(note); graphOpen = false; })

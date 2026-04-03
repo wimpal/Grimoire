@@ -12,7 +12,30 @@
   // ── Props ─────────────────────────────────────────────────────────────────
 
   // Called when the user clicks a node. Passes the note id.
-  let { onSelectNote, activeNoteId = null } = $props();
+  let { onSelectNote, activeNoteId = null, theme = 'system' } = $props();
+
+  // ── Spellbook: background stars ───────────────────────────────────────
+  // A fixed set of tiny dots scattered across the sky. Generated once on
+  // resize from a simple pseudo-random seed so they stay stable between frames.
+  let bgStars = [];
+
+  function generateStars(w, h) {
+    const count = Math.floor((w * h) / 2400); // roughly 1 star per 2400px²
+    const stars = [];
+    let seed = 42;
+    for (let i = 0; i < count; i++) {
+      seed = (seed * 16807 + 7) % 2147483647; // Park-Miller LCG
+      const x = (seed / 2147483647) * w;
+      seed = (seed * 16807 + 7) % 2147483647;
+      const y = (seed / 2147483647) * h;
+      seed = (seed * 16807 + 7) % 2147483647;
+      const r = 0.4 + (seed / 2147483647) * 1.1;  // radius 0.4–1.5
+      seed = (seed * 16807 + 7) % 2147483647;
+      const a = 0.2 + (seed / 2147483647) * 0.5;   // alpha 0.2–0.7
+      stars.push({ x, y, r, a });
+    }
+    bgStars = stars;
+  }
 
   // ── Canvas and simulation state ───────────────────────────────────────────
 
@@ -32,35 +55,51 @@
   let dragOffsetX = 0;
   let dragOffsetY = 0;
 
-  // ── CSS variable helpers ──────────────────────────────────────────────────
-  // Read the CSS variables once so the canvas colours match the theme.
-
-  function cssVar(name) {
-    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  }
-
   // ── Draw ──────────────────────────────────────────────────────────────────
 
   function draw() {
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
+    const isSpellbook = theme === 'spellbook';
 
-    // Theme colours (read each frame so dark/light switches work without reload)
-    const colBorder  = cssVar('--border');
-    const colAccent  = cssVar('--accent');
-    const colAccentBg = cssVar('--accent-bg');
-    const colText    = cssVar('--text-h');
-    const colBg      = cssVar('--bg2');
-    const colNode    = cssVar('--bg3');
+    // Read the graph-overlay's own CSS variables (not :root) so spellbook
+    // overrides on .graph-overlay take effect automatically.
+    const overlay = canvas.parentElement;
+    const cs = getComputedStyle(overlay);
+    const colBorder   = cs.getPropertyValue('--border').trim();
+    const colAccent   = cs.getPropertyValue('--accent').trim();
+    const colAccentBg = cs.getPropertyValue('--accent-bg').trim();
+    const colText     = cs.getPropertyValue('--text-h').trim();
+    const colBg       = cs.getPropertyValue('--bg2').trim();
+    const colNode     = cs.getPropertyValue('--bg3').trim();
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Edges
+    // ── Spellbook: background stars ───────────────────────────────────
+    if (isSpellbook) {
+      for (const star of bgStars) {
+        ctx.globalAlpha = star.a;
+        ctx.fillStyle = '#f0e0c0';
+        ctx.beginPath();
+        ctx.arc(star.x * dpr, star.y * dpr, star.r * dpr, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // ── Edges / constellation lines ──────────────────────────────────
     ctx.save();
-    ctx.strokeStyle = colBorder;
-    ctx.lineWidth = 1 * dpr;
-    ctx.globalAlpha = 0.6;
+    if (isSpellbook) {
+      ctx.strokeStyle = 'rgba(200, 151, 42, 0.3)';
+      ctx.lineWidth = 1 * dpr;
+      ctx.shadowColor = 'rgba(200, 151, 42, 0.15)';
+      ctx.shadowBlur = 6 * dpr;
+    } else {
+      ctx.strokeStyle = colBorder;
+      ctx.lineWidth = 1 * dpr;
+      ctx.globalAlpha = 0.6;
+    }
     for (const link of links) {
       const s = link.source;
       const t = link.target;
@@ -72,34 +111,98 @@
     }
     ctx.restore();
 
-    // Nodes
+    // ── Nodes / stars ────────────────────────────────────────────────
     const NODE_R = 6 * dpr;
     for (const node of nodes) {
       const isActive  = node.id === activeNoteId;
       const isHovered = node === hoveredNode;
+      const nx = node.x * dpr;
+      const ny = node.y * dpr;
 
-      ctx.beginPath();
-      ctx.arc(node.x * dpr, node.y * dpr, NODE_R, 0, Math.PI * 2);
+      if (isSpellbook) {
+        // ── Star glow: radial gradient from bright core outward ──────
+        const glowR = (isActive ? 18 : isHovered ? 14 : 10) * dpr;
+        const grad = ctx.createRadialGradient(nx, ny, 0, nx, ny, glowR);
 
-      if (isActive) {
-        ctx.fillStyle = colAccent;
-      } else if (isHovered) {
-        ctx.fillStyle = colAccentBg;
+        if (isActive) {
+          grad.addColorStop(0,   'rgba(200, 151, 42, 0.95)');
+          grad.addColorStop(0.3, 'rgba(200, 151, 42, 0.5)');
+          grad.addColorStop(1,   'rgba(200, 151, 42, 0)');
+        } else if (isHovered) {
+          grad.addColorStop(0,   'rgba(240, 224, 192, 0.85)');
+          grad.addColorStop(0.3, 'rgba(200, 151, 42, 0.35)');
+          grad.addColorStop(1,   'rgba(200, 151, 42, 0)');
+        } else {
+          grad.addColorStop(0,   'rgba(240, 224, 192, 0.7)');
+          grad.addColorStop(0.4, 'rgba(200, 151, 42, 0.15)');
+          grad.addColorStop(1,   'rgba(200, 151, 42, 0)');
+        }
+
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(nx, ny, glowR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Hard bright core
+        const coreR = (isActive ? 3.5 : isHovered ? 3 : 2) * dpr;
+        ctx.fillStyle = isActive ? '#f0d060' : '#f0e0c0';
+        ctx.beginPath();
+        ctx.arc(nx, ny, coreR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 4-point sparkle rays on active or hovered stars
+        if (isActive || isHovered) {
+          const rayLen = (isActive ? 14 : 10) * dpr;
+          const rayW   = 0.5 * dpr;
+          ctx.save();
+          ctx.strokeStyle = isActive ? 'rgba(240, 208, 96, 0.6)' : 'rgba(240, 224, 192, 0.4)';
+          ctx.lineWidth = rayW;
+          for (let angle = 0; angle < Math.PI * 2; angle += Math.PI / 2) {
+            ctx.beginPath();
+            ctx.moveTo(nx, ny);
+            ctx.lineTo(nx + Math.cos(angle) * rayLen, ny + Math.sin(angle) * rayLen);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
       } else {
-        ctx.fillStyle = colNode;
+        // ── Default (non-spellbook) rendering ────────────────────────
+        ctx.beginPath();
+        ctx.arc(nx, ny, NODE_R, 0, Math.PI * 2);
+
+        if (isActive) {
+          ctx.fillStyle = colAccent;
+        } else if (isHovered) {
+          ctx.fillStyle = colAccentBg;
+        } else {
+          ctx.fillStyle = colNode;
+        }
+        ctx.fill();
+
+        ctx.strokeStyle = isActive ? colAccent : colBorder;
+        ctx.lineWidth = (isActive ? 2 : 1) * dpr;
+        ctx.stroke();
       }
-      ctx.fill();
 
-      ctx.strokeStyle = isActive ? colAccent : colBorder;
-      ctx.lineWidth = (isActive ? 2 : 1) * dpr;
-      ctx.stroke();
-
-      // Label — only draw when hovered or active to avoid unreadable clutter
+      // Label — only draw when hovered or active
       if (isHovered || isActive) {
-        ctx.font = `${11 * dpr}px system-ui, sans-serif`;
+        const fontFamily = isSpellbook
+          ? "'Palatino Linotype', 'Book Antiqua', Palatino, Georgia, serif"
+          : 'system-ui, sans-serif';
+        ctx.font = `${11 * dpr}px ${fontFamily}`;
         ctx.fillStyle = colText;
         ctx.textAlign = 'center';
-        ctx.fillText(node.title, node.x * dpr, (node.y - 10) * dpr);
+
+        if (isSpellbook) {
+          // Subtle glow behind label text for readability
+          ctx.save();
+          ctx.shadowColor = 'rgba(200, 151, 42, 0.4)';
+          ctx.shadowBlur = 4 * dpr;
+          ctx.fillText(node.title, nx, (node.y - 14) * dpr);
+          ctx.restore();
+        } else {
+          ctx.fillText(node.title, nx, (node.y - 10) * dpr);
+        }
       }
     }
   }
@@ -170,6 +273,7 @@
     canvas.style.height = height + 'px';
     canvas.width  = width  * dpr;
     canvas.height = height * dpr;
+    if (theme === 'spellbook') generateStars(width, height);
     if (simulation) {
       simulation.force('center', forceCenter(width / 2, height / 2));
       simulation.alpha(0.3).restart();
