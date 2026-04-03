@@ -1,5 +1,14 @@
 <script>
   import { invoke } from '@tauri-apps/api/core';
+  import { untrack, tick } from 'svelte';
+
+  // ── Props ──────────────────────────────────────────────────────────────────
+
+  // The note currently open in the editor, passed down from App.svelte.
+  // Shape: { id, title, content, ... } | null
+  // pendingInsert: { text: string, seq: number } — injected quote from the editor keybind.
+  // keepInMemory: when true, keep_alive: -1 is sent so Ollama never unloads the model.
+  let { activeNote = null, pendingInsert = null, keepInMemory = false } = $props();
 
   // ── State ──────────────────────────────────────────────────────────────────
 
@@ -11,6 +20,24 @@
   let error = $state('');
   let useNotes = $state(true);
 
+  // Reference to the chat textarea so we can focus it after injection.
+  let inputEl = $state(null);
+
+  // Watch for new injections from the editor keybind.
+  $effect(() => {
+    if (!pendingInsert) return;
+    // Format the selection as a blockquote.
+    const quoted = pendingInsert.text
+      .split('\n')
+      .map(line => `> ${line}`)
+      .join('\n');
+    // Read input without tracking it as a dependency — avoids an infinite loop
+    // where writing input would re-trigger this effect.
+    const current = untrack(() => input);
+    input = current ? `${current}\n\n${quoted}\n` : `${quoted}\n`;
+    inputEl?.focus();
+  });
+
   // Titles of notes injected as context for the most recent message.
   // Empty when notes search is off, failed, or returned nothing.
   let sourcesUsed = $state([]);
@@ -20,10 +47,13 @@
   let messagesEl = $state(null);
 
   // Scroll to the bottom whenever the messages array changes.
+  // tick() waits for Svelte to finish updating the DOM before measuring scrollHeight,
+  // otherwise we'd scroll to the pre-update height and land one message short.
   $effect(() => {
-    // Read messages.length to create a dependency on the array.
     if (messages.length && messagesEl) {
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      tick().then(() => {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      });
     }
   });
 
@@ -43,14 +73,37 @@
     notesError = '';
 
     try {
-      // When useNotes is on, search the vector index and inject relevant notes
-      // as a system message. The system message is never added to the visible
-      // messages array — it's injected per-send so it doesn't grow the history.
+      // Build a system message from two optional sources:
+      //   1. The note the user currently has open (always injected if present).
+      //   2. RAG search results from the vector index (injected when useNotes is on).
+      // The system message is never added to the visible messages array — it's
+      // injected per-send so it doesn't grow the visible history.
       let payload = updated;
+      const systemParts = [];
+
+      // ── 1. Active note ─────────────────────────────────────────────────────
+      if (activeNote) {
+        systemParts.push(
+          `## Note the user currently has open\n### ${activeNote.title}\n${activeNote.content}`
+        );
+      }
+
+      // ── 2. RAG context ─────────────────────────────────────────────────────
+      // Always search even when a note is open — the question may be relevant
+      // to other notes beyond the one currently being edited.
       if (useNotes) {
+        // Use the current message plus the previous user turn for the RAG query.
+        // This gives short follow-ups like "and what about cows?" enough context
+        // to find the right note, without diluting the signal when the user
+        // switches topics (e.g. "and ducks?" after discussing horses and cows).
+        const recentUserMessages = updated
+          .filter(m => m.role === 'user')
+          .slice(-2)
+          .map(m => m.content)
+          .join(' ');
         let matches = [];
         try {
-          matches = await invoke('search_notes', { query: text });
+          matches = await invoke('search_notes', { query: recentUserMessages });
         } catch (e) {
           // Surface the error so the user knows RAG isn't working rather than
           // silently falling back to the model's generic training data.
@@ -63,29 +116,34 @@
           const byTitle = {};
           for (const m of matches) {
             if (!byTitle[m.title]) byTitle[m.title] = [];
-            byTitle[m.title].push(m.excerpt);
+            byTitle[m.title].push(...m.excerpts);
           }
           sourcesUsed = Object.keys(byTitle);
           const context = Object.entries(byTitle)
             .map(([title, excerpts]) => `### ${title}\n${excerpts.join('\n')}`)
             .join('\n\n---\n\n');
-          const systemMsg = {
-            role: 'system',
-            content:
-              `You are a personal knowledge assistant for the user. Their notes are below.\n\n` +
-              `${context}\n\n` +
-              `IMPORTANT RULES:\n` +
-              `1. Read every note section above carefully before answering.\n` +
-              `2. If ANY note contains information that answers the question — even a single sentence — you MUST report it. Do NOT say the user hasn't mentioned something if it appears above.\n` +
-              `3. Quote or paraphrase the user's own words when reporting what they've written.\n` +
-              `4. Only say the notes don't contain something if you have checked every section and found nothing relevant.`,
-          };
-          payload = [systemMsg, ...updated];
+          systemParts.push(`## Related notes\n${context}`);
         }
       }
 
+      // ── Assemble system message ────────────────────────────────────────────
+      if (systemParts.length > 0) {
+        const systemMsg = {
+          role: 'system',
+          content:
+            `You are a personal knowledge assistant for the user.\n\n` +
+            systemParts.join('\n\n---\n\n') +
+            `\n\nIMPORTANT RULES:\n` +
+            `1. Read every note section above carefully before answering.\n` +
+            `2. If ANY note contains information that answers the question — even a single sentence — you MUST report it. Do NOT say the user hasn't mentioned something if it appears above.\n` +
+            `3. Quote or paraphrase the user's own words when reporting what they've written.\n` +
+            `4. Only say the notes don't contain something if you have checked every section and found nothing relevant.`,
+        };
+        payload = [systemMsg, ...updated];
+      }
+
       // Pass the full conversation history so Ollama keeps context.
-      const reply = await invoke('chat', { model, messages: payload });
+      const reply = await invoke('chat', { model, messages: payload, keepInMemory });
       messages = [...messages, { role: 'assistant', content: reply }];
     } catch (e) {
       error = String(e);
@@ -160,13 +218,15 @@
     <p class="chat-error">{error}</p>
   {/if}
 
-  {#if sourcesUsed.length > 0}
-    <div class="chat-sources">
-      <span class="chat-sources-label">Sources:</span>
-      {#each sourcesUsed as title}
-        <span class="chat-source-pill">{title}</span>
-      {/each}
-    </div>
+  {#if sourcesUsed.length > 0 && !isLoading}
+    <details class="chat-sources">
+      <summary class="chat-sources-summary">Sources ({sourcesUsed.length})</summary>
+      <div class="chat-sources-pills">
+        {#each sourcesUsed as title}
+          <span class="chat-source-pill">{title}</span>
+        {/each}
+      </div>
+    </details>
   {/if}
 
   {#if import.meta.env.DEV}
@@ -195,6 +255,7 @@
 
   <div class="chat-input-row">
     <textarea
+      bind:this={inputEl}
       bind:value={input}
       onkeydown={handleKeydown}
       placeholder="Message… (Enter to send, Shift+Enter for newline)"

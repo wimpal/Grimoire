@@ -102,45 +102,103 @@ pub async fn init(app: &tauri::AppHandle) -> Result<Connection, String> {
     Ok(conn)
 }
 
-/// Call Ollama's /api/embed endpoint and return the embedding vector.
-/// The caller is responsible for choosing the model (we use nomic-embed-text).
-pub async fn embed(text: &str, model: &str) -> Result<Vec<f32>, String> {
+/// Evict all currently loaded Ollama models *except* the one we're about to use.
+/// On AMD RDNA4 with Vulkan, running two models simultaneously causes GPU crashes.
+/// Skipping the target model avoids the cost of unloading and reloading it when
+/// it is already resident from the previous call (e.g. during a bulk reindex).
+async fn evict_other_models(client: &reqwest::Client, keep_model: &str) {
+    #[derive(Deserialize)]
+    struct RunningModel { name: String }
+    #[derive(Deserialize)]
+    struct PsResp { models: Vec<RunningModel> }
     #[derive(Serialize)]
-    struct Options {
-        num_thread: usize,
-    }
+    struct UnloadReq<'a> { model: &'a str, keep_alive: i32, stream: bool }
 
+    let Ok(resp) = client.get("http://localhost:11434/api/ps").send().await else { return };
+    let Ok(ps) = resp.json::<PsResp>().await else { return };
+    for m in ps.models {
+        if m.name == keep_model { continue; }
+        let _ = client
+            .post("http://localhost:11434/api/generate")
+            .json(&UnloadReq { model: &m.name, keep_alive: 0, stream: false })
+            .send()
+            .await;
+    }
+}
+
+/// Call Ollama's /api/embeddings endpoint and return the embedding vector.
+/// Evicts all running models first to prevent Vulkan GPU context conflicts.
+/// Uses keep_alive=0 so the embed model is unloaded immediately after use.
+/// Retries once on failure — evicting again before the second attempt clears
+/// any GPU state that was corrupted by the first crash.
+pub async fn embed(text: &str, model: &str) -> Result<Vec<f32>, String> {
     #[derive(Serialize)]
     struct Req<'a> {
         model: &'a str,
-        input: &'a str,
-        options: Options,
+        prompt: &'a str,
+        keep_alive: i32,
     }
 
     #[derive(Deserialize)]
     struct Resp {
-        embeddings: Vec<Vec<f32>>,
+        embedding: Vec<f32>,
     }
 
-    let total = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    let num_thread = (total / 2).max(1);
+    // 120-second timeout — embedding a single chunk should never take this long.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
-    let resp: Resp = reqwest::Client::new()
-        .post("http://localhost:11434/api/embed")
-        .json(&Req { model, input: text, options: Options { num_thread } })
-        .send()
-        .await
-        .map_err(|e| format!("Could not reach Ollama: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("Unexpected embed response: {e}"))?;
+    let mut last_err = String::new();
+    for attempt in 1u32..=2 {
+        // Evict competing models before every attempt. Skips the embed model itself
+        // so it stays resident across consecutive calls (e.g. during bulk reindex).
+        evict_other_models(&client, model).await;
 
-    resp.embeddings
-        .into_iter()
-        .next()
-        .ok_or_else(|| "Empty embedding response from Ollama".to_string())
+        let result: Result<Vec<f32>, String> = async {
+            let response = client
+                .post("http://localhost:11434/api/embeddings")
+                .json(&Req { model, prompt: text, keep_alive: 0 })
+                .send()
+                .await
+                .map_err(|e| format!("Could not reach Ollama (embedding): {e}"))?;
+
+            let text_body = response
+                .text()
+                .await
+                .map_err(|e| format!("Could not read embed response: {e}"))?;
+
+            let resp: Resp = serde_json::from_str(&text_body)
+                .map_err(|e| format!("Unexpected embed response: {e}\nBody: {text_body}"))?;
+
+            if resp.embedding.is_empty() {
+                return Err("Empty embedding response from Ollama".to_string());
+            }
+
+            // Sanity check: nomic-embed-text returns approximately unit-normalized
+            // vectors (norm ≈ 1.0). A near-zero norm means Ollama returned garbage
+            // from a crashed inference — treat it as an error and retry.
+            let norm: f32 = resp.embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm < 0.1 {
+                return Err(format!("Degenerate embedding vector (norm={norm:.4}) — Ollama inference likely crashed"));
+            }
+
+            Ok(resp.embedding)
+        }.await;
+
+        match result {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                last_err = e;
+                if attempt < 2 {
+                    // Wait for Ollama to finish cleaning up the crashed runner.
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }
+        }
+    }
+    Err(last_err)
 }
 
 /// Insert or replace all chunks for a note in the vector index.
@@ -232,13 +290,13 @@ pub async fn purge_all(conn: &Connection) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// A note returned from a semantic search.
+/// A note returned from a semantic search. May include multiple excerpts
+/// from different chunks of the same note.
 #[derive(Debug, Serialize)]
 pub struct NoteMatch {
     pub note_id: i64,
     pub title: String,
-    /// First ~500 characters of the note content.
-    pub excerpt: String,
+    pub excerpts: Vec<String>,
 }
 
 /// A raw search hit including the distance score. Used for debugging threshold calibration.
@@ -292,10 +350,9 @@ pub async fn search(
         .await
         .map_err(|e| e.to_string())?;
 
-    let mut results = Vec::new();
-    // Best chunk per note (lowest distance = most relevant). We collect one
-    // representative excerpt per unique note, then return the top MAX_SOURCE_NOTES.
-    let mut seen_notes: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    // Pass 1: find the best distance per note across all chunks.
+    // This is used to rank notes and select the top MAX_SOURCE_NOTES.
+    let mut best_dist: std::collections::HashMap<i64, (f32, String)> = std::collections::HashMap::new();
 
     for batch in &batches {
         let ids = batch
@@ -306,44 +363,82 @@ pub async fn search(
             .column_by_name("title")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
             .ok_or("missing title column in search results")?;
+        let distances = batch
+            .column_by_name("_distance")
+            .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+            .ok_or("missing _distance column in search results")?;
+
+        for i in 0..batch.num_rows() {
+            let note_id = ids.value(i);
+            let distance = distances.value(i);
+            let entry = best_dist.entry(note_id).or_insert((f32::MAX, titles.value(i).to_string()));
+            if distance < entry.0 {
+                entry.0 = distance;
+            }
+        }
+    }
+
+    // Pick the top MAX_SOURCE_NOTES notes by best chunk distance.
+    let mut ranked: Vec<(i64, f32, String)> = best_dist
+        .into_iter()
+        .map(|(id, (dist, title))| (id, dist, title))
+        .collect();
+    ranked.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(MAX_SOURCE_NOTES);
+    let top_ids: std::collections::HashSet<i64> = ranked.iter().map(|(id, _, _)| *id).collect();
+
+    // Pass 2: collect all chunks that belong to the top notes, preserving chunk order.
+    // We keep a map from note_id → list of (chunk_index, excerpt).
+    let mut note_chunks: std::collections::HashMap<i64, Vec<(i32, String)>> =
+        std::collections::HashMap::new();
+
+    for batch in &batches {
+        let ids = batch
+            .column_by_name("note_id")
+            .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+            .ok_or("missing note_id column in search results")?;
         let contents = batch
             .column_by_name("content")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>())
             .ok_or("missing content column in search results")?;
+        let chunk_indices = batch
+            .column_by_name("chunk_index")
+            .and_then(|c| c.as_any().downcast_ref::<Int32Array>())
+            .ok_or("missing chunk_index column in search results")?;
 
         for i in 0..batch.num_rows() {
             let note_id = ids.value(i);
-
-            // Only take the first (best-ranked) chunk per note.
-            if seen_notes.contains(&note_id) {
+            if !top_ids.contains(&note_id) {
                 continue;
             }
-            seen_notes.insert(note_id);
-
             let raw = contents.value(i);
             let excerpt = if raw.chars().count() > 500 {
-                let cutoff = raw
-                    .char_indices()
-                    .nth(500)
-                    .map(|(byte_i, _)| byte_i)
-                    .unwrap_or(raw.len());
+                let cutoff = raw.char_indices().nth(500).map(|(b, _)| b).unwrap_or(raw.len());
                 format!("{}\u{2026}", &raw[..cutoff])
             } else {
                 raw.to_string()
             };
-
-            results.push(NoteMatch {
-                note_id,
-                title: titles.value(i).to_string(),
-                excerpt,
-            });
-
-            // Stop once we have enough distinct notes.
-            if seen_notes.len() >= MAX_SOURCE_NOTES {
-                return Ok(results);
+            let chunks = note_chunks.entry(note_id).or_default();
+            let ci = chunk_indices.value(i);
+            if !chunks.iter().any(|(c, _)| *c == ci) {
+                chunks.push((ci, excerpt));
             }
         }
     }
+
+    // Assemble final results in ranked order.
+    let results = ranked
+        .into_iter()
+        .map(|(note_id, _, title)| {
+            let mut chunks = note_chunks.remove(&note_id).unwrap_or_default();
+            chunks.sort_by_key(|(ci, _)| *ci);
+            NoteMatch {
+                note_id,
+                title,
+                excerpts: chunks.into_iter().map(|(_, e)| e).collect(),
+            }
+        })
+        .collect();
 
     Ok(results)
 }

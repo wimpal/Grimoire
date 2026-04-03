@@ -64,7 +64,7 @@ h2 {
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  padding: 16px 12px;
+  padding: 16px 12px 44px;
   gap: 4px;
   overflow: hidden;
 }
@@ -471,6 +471,39 @@ li:hover .icon-btn {
   display: block;
 }
 
+/* ── Gear / settings button ───────────────────────────────────────── */
+
+.bottom-left-btns {
+  position: fixed;
+  bottom: 12px;
+  left: 12px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.gear-btn,
+.lock-quick-btn {
+  background: none;
+  border: none;
+  padding: 4px 6px;
+  border-radius: 5px;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text);
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+}
+
+.gear-btn:hover,
+.lock-quick-btn:hover {
+  opacity: 1;
+  background: var(--bg3);
+  color: var(--text-h);
+}
+
 /* ── Chat panel ───────────────────────────────────────────────────── */
 
 .chat-panel {
@@ -598,27 +631,44 @@ li:hover .icon-btn {
 }
 
 .chat-sources {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-  padding: 6px 14px;
   border-top: 1px solid var(--border);
   flex-shrink: 0;
 }
 
-.chat-sources-label {
+.chat-sources-summary {
+  padding: 5px 14px;
+  cursor: pointer;
   font-size: 11px;
-  color: var(--text-dim);
   font-family: var(--sans);
-  margin-right: 2px;
+  color: var(--text);
+  user-select: none;
+  list-style: none;
+}
+
+.chat-sources-summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-sources-summary::before {
+  content: '› ';
+}
+
+.chat-sources[open] .chat-sources-summary::before {
+  content: '˅ ';
+}
+
+.chat-sources-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 14px 8px;
 }
 
 .chat-source-pill {
   font-size: 11px;
   font-family: var(--sans);
-  color: var(--text-dim);
-  background: var(--surface-2);
+  color: var(--text);
+  background: var(--bg3);
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 1px 6px;
@@ -1273,6 +1323,129 @@ li:hover .icon-btn {
   outline: none;
 }
 
+/* ── Accent colour overrides ────────────────────────────────────────────── */
+/* Applied via data-accent attribute on <html>. Default (red) needs no block —
+   it is already defined in :root. These selectors come after the media query
+   so they win the cascade regardless of OS dark/light setting.             */
+
+[data-accent="cyan"] {
+  --accent: #0c6e7e;
+  --accent-bg: rgba(12, 110, 126, 0.08);
+}
+
+[data-accent="green"] {
+  --accent: #256b3a;
+  --accent-bg: rgba(37, 107, 58, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-accent="cyan"] {
+    --accent: #2ab8c8;
+    --accent-bg: rgba(42, 184, 200, 0.15);
+  }
+
+  [data-accent="green"] {
+    --accent: #3dab65;
+    --accent-bg: rgba(61, 171, 101, 0.15);
+  }
+}
+
+/* ── Manual light/dark theme overrides ──────────────────────────────────── */
+/* Applied via data-theme attribute on <html>. "system" means no attribute —
+   the OS media query above takes effect normally.                           */
+
+[data-theme="light"] {
+  --text: #6b5f5f;
+  --text-h: #1a0f0f;
+  --bg: #fdfaf9;
+  --bg2: #f6f0ef;
+  --bg3: #ede5e4;
+  --border: #ddd4d3;
+  --accent: #9b2020;
+  --accent-bg: rgba(155, 32, 32, 0.08);
+  --danger: #c0392b;
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --text: #9e8f8f;
+  --text-h: #f0e8e8;
+  --bg: #171412;
+  --bg2: #201a1a;
+  --bg3: #2b2222;
+  --border: #352828;
+  --accent: #c0443a;
+  --accent-bg: rgba(192, 68, 58, 0.15);
+  --danger: #e06060;
+  color-scheme: dark;
+}
+
+/* Accent overrides when theme is pinned to dark (media query won't fire). */
+[data-theme="dark"][data-accent="cyan"] {
+  --accent: #2ab8c8;
+  --accent-bg: rgba(42, 184, 200, 0.15);
+}
+
+[data-theme="dark"][data-accent="green"] {
+  --accent: #3dab65;
+  --accent-bg: rgba(61, 171, 101, 0.15);
+}
+
+/* Accent overrides when theme is pinned to light. */
+[data-theme="light"][data-accent="cyan"] {
+  --accent: #0c6e7e;
+  --accent-bg: rgba(12, 110, 126, 0.08);
+}
+
+[data-theme="light"][data-accent="green"] {
+  --accent: #256b3a;
+  --accent-bg: rgba(37, 107, 58, 0.08);
+}
+
+/* ── Spellbook theme ─────────────────────────────────────────────────────── */
+/* A standalone dark theme. Overrides everything — including accent colour,  */
+/* font family, and colour-scheme. Accent swatches have no effect here.      */
+
+[data-theme="spellbook"] {
+  --text:       #c8b89a;                       /* aged ink, warm cream        */
+  --text-h:     #f0e0c0;                       /* bright parchment, headings  */
+  --bg:         #150f07;                       /* near-black warm brown       */
+  --bg2:        #1d1409;                       /* sidebar / panel background  */
+  --bg3:        #2a1d0d;                       /* hover states — ember glow   */
+  --border:     #3d2b14;                       /* dark wood grain             */
+  --accent:     #c8972a;                       /* illuminated gold            */
+  --accent-bg:  rgba(200, 151, 42, 0.13);      /* gold glow                   */
+  --danger:     #c0392b;                       /* stays red always            */
+  color-scheme: dark;
+  /* Serif font stack — uses system fonts so no download is required.        */
+  /* Palatino Linotype is installed on every Windows machine since XP.       */
+  --sans: 'Palatino Linotype', 'Book Antiqua', Palatino, Georgia, serif;
+  --mono: 'Palatino Linotype', 'Book Antiqua', Palatino, Georgia, serif;
+}
+
+/* Slightly looser line-height and larger base size for the editorial feel. */
+[data-theme="spellbook"] body {
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+/* Editor pane: warm inner glow to evoke candlelight on parchment.          */
+[data-theme="spellbook"] .editor {
+  box-shadow: inset 0 0 80px rgba(200, 140, 30, 0.04);
+}
+
+/* Title input: slightly bigger, more weight — chapter heading feel.        */
+[data-theme="spellbook"] .title-input {
+  font-size: 20px;
+  letter-spacing: 0.01em;
+}
+
+/* Sidebar and note list headings rendered as small-caps.                   */
+[data-theme="spellbook"] h2 {
+  font-variant: small-caps;
+  letter-spacing: 0.1em;
+}
+
 .db-cell-input:focus {
   border-color: var(--accent);
   background: var(--bg);
@@ -1290,5 +1463,204 @@ li:hover .icon-btn {
   font-size: 13px;
   padding: 0 4px;
   user-select: none;
+}
+
+/* ── Filter bar ──────────────────────────────────────────────────────────── */
+
+.db-filter-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.db-filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.db-filter-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+.db-filter-chip-name {
+  font-family: var(--sans);
+  font-weight: 600;
+  color: var(--text-h);
+  white-space: nowrap;
+}
+
+.db-filter-op {
+  font-family: var(--sans);
+  font-size: 12px;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.db-filter-input {
+  font-family: var(--sans);
+  font-size: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  padding: 1px 4px;
+  width: 130px;
+}
+
+.db-filter-input--narrow {
+  width: 70px;
+}
+
+.db-filter-between-sep {
+  color: var(--text);
+  opacity: 0.5;
+  font-size: 12px;
+}
+
+.db-filter-select-opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.db-filter-select-opt {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.db-filter-remove {
+  background: none;
+  border: none;
+  color: var(--text);
+  opacity: 0.4;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  border-radius: 3px;
+}
+
+.db-filter-remove:hover {
+  opacity: 1;
+  color: var(--danger);
+}
+
+.db-filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.db-filter-add-wrap {
+  position: relative;
+}
+
+.db-filter-add-btn {
+  font-family: var(--sans);
+  font-size: 12px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 3px 8px;
+}
+
+.db-filter-add-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.db-filter-add-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.db-filter-add-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 100;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  min-width: 140px;
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.db-filter-add-opt {
+  background: none;
+  border: none;
+  text-align: left;
+  font-family: var(--sans);
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 6px 10px;
+}
+
+.db-filter-add-opt:hover {
+  background: var(--bg);
+  color: var(--text-h);
+}
+
+.db-filter-apply-btn {
+  font-family: var(--sans);
+  font-size: 12px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: #fff;
+  cursor: pointer;
+  padding: 3px 10px;
+}
+
+.db-filter-apply-btn:hover {
+  opacity: 0.85;
+}
+
+.db-filter-clear-btn {
+  font-family: var(--sans);
+  font-size: 12px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 3px 8px;
+}
+
+.db-filter-clear-btn:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.db-filter-count {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--text);
+  opacity: 0.6;
+  margin-left: 4px;
 }
 

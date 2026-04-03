@@ -1,0 +1,294 @@
+use serde::Serialize;
+use sqlx::SqlitePool;
+use tauri::State;
+use crate::KeyStore;
+use super::{NoteRow, map_note_row};
+
+// ---------------------------------------------------------------------------
+// Note properties / databases
+// ---------------------------------------------------------------------------
+
+/// A property definition — one per "column" in a folder's database schema.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct PropertyDef {
+    pub id: i64,
+    pub folder_id: Option<i64>,
+    pub name: String,
+    #[sqlx(rename = "type")]
+    #[serde(rename = "type")]
+    pub r#type: String,
+    pub options: Option<String>,  // JSON array, only for 'select' type
+    pub position: i64,
+}
+
+/// A single property value attached to a note.
+/// Denormalised: includes the def's name, type, and options so the frontend
+/// can render the correct input without a second round-trip.
+/// `value` is `None` when the note has no row for this property (LEFT JOIN miss
+/// in the table view) and `Some(...)` when the note owns the property.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct NoteProperty {
+    pub def_id: i64,
+    pub name: String,
+    #[sqlx(rename = "type")]
+    #[serde(rename = "type")]
+    pub r#type: String,
+    pub options: Option<String>,
+    pub value: Option<String>,
+}
+
+/// Return all property definitions for a folder, ordered by position.
+#[tauri::command]
+pub async fn get_property_defs(
+    pool: State<'_, SqlitePool>,
+    folder_id: i64,
+) -> Result<Vec<PropertyDef>, String> {
+    let defs = sqlx::query_as::<_, PropertyDef>(
+        "SELECT id, folder_id, name, type, options, position
+         FROM property_defs
+         WHERE folder_id = ?
+         ORDER BY position ASC, id ASC",
+    )
+    .bind(folder_id)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(defs)
+}
+
+/// Create a new property definition for a folder and return it.
+#[tauri::command]
+pub async fn create_property_def(
+    pool: State<'_, SqlitePool>,
+    folder_id: i64,
+    name: String,
+    r#type: String,
+    options: Option<String>,
+) -> Result<PropertyDef, String> {
+    // Validate type
+    if !["text", "number", "date", "boolean", "select"].contains(&r#type.as_str()) {
+        return Err(format!("Invalid property type: {}", r#type));
+    }
+
+    // Auto-assign position as max+1
+    let max_pos: Option<i64> = sqlx::query_scalar(
+        "SELECT MAX(position) FROM property_defs WHERE folder_id = ?",
+    )
+    .bind(folder_id)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let position = max_pos.unwrap_or(-1) + 1;
+
+    let def = sqlx::query_as::<_, PropertyDef>(
+        "INSERT INTO property_defs (folder_id, name, type, options, position)
+         VALUES (?, ?, ?, ?, ?)
+         RETURNING id, folder_id, name, type, options, position",
+    )
+    .bind(folder_id)
+    .bind(&name)
+    .bind(&r#type)
+    .bind(&options)
+    .bind(position)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(def)
+}
+
+/// Update a property definition (name, type, options).
+#[tauri::command]
+pub async fn update_property_def(
+    pool: State<'_, SqlitePool>,
+    id: i64,
+    name: String,
+    r#type: String,
+    options: Option<String>,
+) -> Result<PropertyDef, String> {
+    if !["text", "number", "date", "boolean", "select"].contains(&r#type.as_str()) {
+        return Err(format!("Invalid property type: {}", r#type));
+    }
+
+    let def = sqlx::query_as::<_, PropertyDef>(
+        "UPDATE property_defs SET name = ?, type = ?, options = ? WHERE id = ?
+         RETURNING id, folder_id, name, type, options, position",
+    )
+    .bind(&name)
+    .bind(&r#type)
+    .bind(&options)
+    .bind(id)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(def)
+}
+
+/// Delete a property definition. Cascades to all note_properties rows.
+#[tauri::command]
+pub async fn delete_property_def(pool: State<'_, SqlitePool>, id: i64) -> Result<(), String> {
+    sqlx::query("DELETE FROM property_defs WHERE id = ?")
+        .bind(id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Reorder a property definition to a new position.
+/// Shifts other defs in the same folder to make room.
+#[tauri::command]
+pub async fn reorder_property_def(
+    pool: State<'_, SqlitePool>,
+    id: i64,
+    new_position: i64,
+) -> Result<(), String> {
+    // Get the def's folder_id so we can reorder within that folder.
+    let folder_id: i64 = sqlx::query_scalar(
+        "SELECT folder_id FROM property_defs WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Shift everything at or after the target position up by 1.
+    sqlx::query(
+        "UPDATE property_defs
+         SET position = position + 1
+         WHERE folder_id = ? AND position >= ?",
+    )
+    .bind(folder_id)
+    .bind(new_position)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Place our def at the target position.
+    sqlx::query("UPDATE property_defs SET position = ? WHERE id = ?")
+        .bind(new_position)
+        .bind(id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// Return property values for a note — only defs for which an explicit
+/// note_properties row exists (INNER JOIN). Notes that have never had a
+/// property set will return an empty list, keeping blank notes clean.
+#[tauri::command]
+pub async fn get_note_properties(
+    pool: State<'_, SqlitePool>,
+    note_id: i64,
+) -> Result<Vec<NoteProperty>, String> {
+    let props = sqlx::query_as::<_, NoteProperty>(
+        "SELECT pd.id AS def_id, pd.name, pd.type, pd.options, np.value
+         FROM note_properties np
+         INNER JOIN property_defs pd ON pd.id = np.def_id
+         WHERE np.note_id = ?
+         ORDER BY pd.position ASC, pd.id ASC",
+    )
+    .bind(note_id)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(props)
+}
+
+/// Set (upsert) a single property value for a note.
+#[tauri::command]
+pub async fn set_note_property(
+    pool: State<'_, SqlitePool>,
+    note_id: i64,
+    def_id: i64,
+    value: String,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO note_properties (note_id, def_id, value) VALUES (?, ?, ?)
+         ON CONFLICT(note_id, def_id) DO UPDATE SET value = excluded.value",
+    )
+    .bind(note_id)
+    .bind(def_id)
+    .bind(&value)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Return all notes in a folder with their property values, formatted for the
+/// table/database view. Returns a list of objects, each containing the note
+/// plus a map of def_id → value.
+#[derive(Debug, Serialize)]
+pub struct NoteWithProperties {
+    pub id: i64,
+    pub title: String,
+    pub folder_id: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub properties: Vec<NoteProperty>,
+}
+
+#[tauri::command]
+pub async fn list_notes_with_properties(
+    pool: State<'_, SqlitePool>,
+    keys: State<'_, KeyStore>,
+    folder_id: i64,
+) -> Result<Vec<NoteWithProperties>, String> {
+    // Fetch notes in the folder.
+    let rows = sqlx::query_as::<_, NoteRow>(
+        "SELECT id, title, content, folder_id, created_at, updated_at
+         FROM notes WHERE folder_id = ? ORDER BY updated_at DESC",
+    )
+    .bind(folder_id)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let folder_locked = {
+        let v: i64 = sqlx::query_scalar("SELECT locked FROM folders WHERE id = ?")
+            .bind(folder_id)
+            .fetch_optional(pool.inner())
+            .await
+            .map_err(|e| e.to_string())?
+            .unwrap_or(0);
+        v != 0
+    };
+
+    // Build per-note property values.
+    let mut result = Vec::new();
+    for row in rows {
+        let note = map_note_row(row, folder_locked, &keys);
+        if note.locked {
+            continue;
+        }
+
+        let props = sqlx::query_as::<_, NoteProperty>(
+            "SELECT pd.id AS def_id, pd.name, pd.type, pd.options, np.value
+             FROM property_defs pd
+             LEFT JOIN note_properties np ON np.def_id = pd.id AND np.note_id = ?
+             WHERE pd.folder_id = ?
+             ORDER BY pd.position ASC, pd.id ASC",
+        )
+        .bind(note.id)
+        .bind(folder_id)
+        .fetch_all(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+        result.push(NoteWithProperties {
+            id: note.id,
+            title: note.title,
+            folder_id: note.folder_id,
+            created_at: note.created_at,
+            updated_at: note.updated_at,
+            properties: props,
+        });
+    }
+
+    Ok(result)
+}

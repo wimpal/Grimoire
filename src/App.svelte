@@ -8,6 +8,7 @@
   import TemplateModal from './lib/TemplateModal.svelte';
   import NoteProperties from './lib/NoteProperties.svelte';
   import DatabaseView from './lib/DatabaseView.svelte';
+  import Settings from './lib/Settings.svelte';
 
   // ── State ──────────────────────────────────────────────────────────────────
 
@@ -37,6 +38,13 @@
   // Chat panel
   let chatOpen = $state(false);
 
+  // When set, Chat.svelte will inject this text as a blockquote into its input.
+  // Uses a seq counter so the same text can be injected multiple times.
+  let chatInsert = $state(null); // { text: string, seq: number } | null
+
+  // Reference to the note editor textarea — used to read the current selection.
+  let editorTextareaEl = $state(null);
+
   // Graph overlay
   let graphOpen = $state(false);
 
@@ -62,8 +70,38 @@
   let templateModalOpen = $state(false);
   let editingTemplate = $state(null); // set to a template object to open the edit modal
 
+  // Settings overlay
+  let settingsOpen = $state(false);
+  let keepModelInMemory = $state(localStorage.getItem('keepModelInMemory') === 'true');
+  let accent = $state(localStorage.getItem('accent') ?? 'red');
+  let theme  = $state(localStorage.getItem('theme')  ?? 'system');
+
+  $effect(() => {
+    localStorage.setItem('keepModelInMemory', String(keepModelInMemory));
+  });
+
+  $effect(() => {
+    localStorage.setItem('accent', accent);
+    localStorage.setItem('theme',  theme);
+
+    const root = document.documentElement;
+    // Accent — remove attribute when red so :root values remain the source of truth.
+    if (accent === 'red') {
+      root.removeAttribute('data-accent');
+    } else {
+      root.setAttribute('data-accent', accent);
+    }
+    // Theme — remove attribute when system so the OS media query fires normally.
+    if (theme === 'system') {
+      root.removeAttribute('data-theme');
+    } else {
+      root.setAttribute('data-theme', theme);
+    }
+  });
+
   // Database / table view
   let tableViewOpen = $state(false);
+  let dbKey = $state(0); // bumped to force DatabaseView remount after template sync
   let folderHasProperties = $state(false); // true when the selected folder has any property defs
   let noteProperties = $state([]); // properties for the active note (for RAG suffix)
   let propertiesReady = $state(true); // false while NoteProperties is fetching, to prevent layout shift
@@ -297,9 +335,16 @@
 
   async function updateTemplate(name, title, content, properties) {
     // Throws on failure so TemplateModal can display the error.
-    await invoke('update_template', { id: editingTemplate.id, name, title, content, properties });
+    const savedId = editingTemplate.id;
+    await invoke('update_template', { id: savedId, name, title, content, properties });
     await loadTemplates();
     editingTemplate = null;
+    // Auto-sync: push the updated specs to all notes/folders tracked to this template.
+    try {
+      await invoke('sync_template_to_notes', { templateId: savedId });
+      // Bump the key so DatabaseView remounts and picks up the new column.
+      dbKey += 1;
+    } catch { /* non-fatal — sync errors should not block the save */ }
   }
 
   async function deleteTemplate(id) {
@@ -381,11 +426,28 @@
     }
   }
 
-  // Save on Ctrl+S
+  // Save on Ctrl+S; lock vault on Ctrl+Shift+L; send selection to chat on Ctrl+Shift+Enter
   function handleKeydown(e) {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
       saveNote();
+    }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'L') {
+      e.preventDefault();
+      if (vaultHasPassword && !vaultLocked) lockVault();
+    }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'Enter') {
+      e.preventDefault();
+      let text = '';
+      if (editorTextareaEl) {
+        const { selectionStart, selectionEnd, value } = editorTextareaEl;
+        text = value.slice(selectionStart, selectionEnd).trim();
+      }
+      // Fall back to note title if nothing is selected
+      if (!text && activeNote) text = activeNote.title;
+      if (!text) return;
+      chatOpen = true;
+      chatInsert = { text, seq: (chatInsert?.seq ?? 0) + 1 };
     }
   }
 
@@ -405,8 +467,8 @@
   async function reindexAll() {
     isReindexing = true;
     try {
-      const n = await invoke('reindex_all');
-      showError(`✓ Re-indexed ${n} notes.`);
+      const msg = await invoke('reindex_all');
+      showError(`✓ ${msg}.`);
     } catch (e) {
       showError(e);
     } finally {
@@ -713,25 +775,6 @@
         <button onclick={createFolder}>+</button>
       </div>
 
-      <!-- Vault password controls -->
-      <div class="vault-lock-section">
-        {#if !vaultHasPassword}
-          <button class="vault-btn" onclick={() => (vaultPwModal = 'set')} title="Password-protect the entire vault">
-            Set vault password
-          </button>
-        {:else}
-          <button class="vault-btn" onclick={() => (vaultPwModal = 'change')} title="Change vault password">
-            Change vault password
-          </button>
-          <button class="vault-btn" onclick={() => (vaultPwModal = 'remove')} title="Remove vault password">
-            Remove vault password
-          </button>
-          <button class="vault-btn danger-text" onclick={lockVault} title="Lock the vault now">
-            Lock vault
-          </button>
-        {/if}
-      </div>
-
       {#if allTags.length > 0}
         <div class="sidebar-section-label tags-header">
           <span>Tags</span>
@@ -918,6 +961,7 @@
       {#if propertiesReady}
         <textarea
           class="content-area"
+          bind:this={editorTextareaEl}
           bind:value={editorContent}
           oninput={markDirty}
           onkeydown={handleEditorKeydown}
@@ -961,10 +1005,12 @@
         </div>
       </div>
       {#if tableViewOpen && selectedFolderId && selectedFolderId !== 'all'}
+        {#key dbKey}
         <DatabaseView
           folderId={selectedFolderId}
           onOpenNote={(id) => openNoteById(id)}
         />
+        {/key}
       {:else}
         <div class="empty-editor">Select or create a note</div>
       {/if}
@@ -972,7 +1018,7 @@
   </main>
 
   {#if chatOpen}
-    <Chat />
+    <Chat {activeNote} pendingInsert={chatInsert} keepInMemory={keepModelInMemory} />
   {/if}
 </div>
 
@@ -989,5 +1035,30 @@
     />
   </div>
 {/if}
+
+{#if settingsOpen}
+  <Settings
+    onClose={() => (settingsOpen = false)}
+    vaultHasPassword={vaultHasPassword}
+    onSetVaultPassword={() => (vaultPwModal = 'set')}
+    onChangeVaultPassword={() => (vaultPwModal = 'change')}
+    onRemoveVaultPassword={() => (vaultPwModal = 'remove')}
+    onLockVault={lockVault}
+    keepInMemory={keepModelInMemory}
+    onKeepInMemoryChange={(v) => (keepModelInMemory = v)}
+    {accent}
+    onAccentChange={(v) => (accent = v)}
+    {theme}
+    onThemeChange={(v) => (theme = v)}
+  />
+{/if}
+
+<!-- Gear button — always visible in the bottom-left corner -->
+<div class="bottom-left-btns">
+  {#if vaultHasPassword}
+    <button class="lock-quick-btn" onclick={lockVault} title="Lock vault (Ctrl+Shift+L)">🔒</button>
+  {/if}
+  <button class="gear-btn" onclick={() => (settingsOpen = true)} title="Settings">⚙</button>
+</div>
 
 {/if} <!-- end of vault-unlocked block -->
