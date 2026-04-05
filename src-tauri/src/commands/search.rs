@@ -57,16 +57,18 @@ pub(crate) async fn fts_delete(pool: &SqlitePool, id: i64) {
 
 /// Convert a raw user query string into a safe FTS5 MATCH expression.
 ///
-/// Each whitespace-separated token is wrapped in double-quotes so it is
-/// treated as a literal phrase term. This prevents users from accidentally
-/// (or intentionally) injecting FTS5 query operators like OR, AND, NOT, *.
+/// Each whitespace-separated token becomes a quoted prefix term in the FTS5 query.
 ///
-/// Example: `rust "error"` â†’ `"rust" "error"`
+/// Quoting prevents injection of FTS5 operators (OR, AND, NOT). The `*` suffix
+/// enables prefix matching so partial words find inflected forms — e.g. "gas"
+/// matches "gases" and "gaseous", "run" matches "running" and "runner".
+///
+/// Example: `rust error` → `"rust"* "error"*`
 fn build_fts_query(raw: &str) -> String {
     raw.split_whitespace()
         .filter_map(|tok| {
             let clean = tok.replace('"', "");
-            if clean.is_empty() { None } else { Some(format!("\"{clean}\"")) }
+            if clean.is_empty() { None } else { Some(format!("\"{clean}\"*")) }
         })
         .collect::<Vec<_>>()
         .join(" ")

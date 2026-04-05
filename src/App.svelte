@@ -53,6 +53,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   // Inline-creation inputs
   let newFolderName = $state('');
   let newNoteTitle = $state('');
+  let newNoteTitleInputEl = $state(null); // bound to the new-note input for Ctrl+N focus
 
   // Error display
   let errorMsg = $state('');
@@ -137,6 +138,22 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       ? allTags.filter(t => t.name.includes(tagSearch.trim().toLowerCase().replace(/^#/, '')))
       : allTags.slice(0, TAG_LIMIT)
   );
+
+  // Note sort order and sorted list.
+  let noteSort = $state('modified');
+  let sortedNotes = $derived.by(() => {
+    const arr = [...notes];
+    if (noteSort === 'name') arr.sort((a, b) => a.title.localeCompare(b.title));
+    else if (noteSort === 'created') arr.sort((a, b) => b.created_at - a.created_at);
+    else arr.sort((a, b) => b.updated_at - a.updated_at);
+    return arr;
+  });
+
+  // Word count and estimated reading time for the active note.
+  let wordCount = $derived(
+    editorContent ? editorContent.trim().split(/\s+/).filter(Boolean).length : 0
+  );
+  let readingTime = $derived(Math.max(1, Math.round(wordCount / 200)));
 
   // Sidebar collapse state
   let foldersOpen = $state(true);
@@ -477,6 +494,12 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     if ((e.ctrlKey || e.metaKey) && e.key === 'f' && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       searchOpen = true;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'n' && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      notesOpen = true;
+      // Svelte may not have rendered the panel yet; wait a frame before focusing.
+      requestAnimationFrame(() => newNoteTitleInputEl?.focus());
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
@@ -879,7 +902,9 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
                 <span class="lock-icon">🔒</span>{folder.name === '<locked>' ? '(locked folder)' : folder.name}
               </button>
             {:else}
+              {@const folderCount = notes.filter(n => n.folder_id === folder.id).length}
               <button class="row-btn folder-name" onclick={() => selectFolder(folder.id)}>{folder.name}</button>
+              {#if folderCount > 0}<span class="folder-count">{folderCount}</span>{/if}
               {#if unlockedFolderIds.has(folder.id)}
                 <button class="icon-btn" title="Remove folder password"
                   onclick={() => (folderPwModal = { mode: 'remove', folderId: folder.id })}>🔓</button>
@@ -978,11 +1003,16 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         {#if tagFilter}
           <button class="clear-filter-btn" onclick={clearTagFilter} title="Clear tag filter">✕</button>
         {/if}
+        <select class="sort-select" bind:value={noteSort} title="Sort notes">
+          <option value="modified">Modified</option>
+          <option value="created">Created</option>
+          <option value="name">Name</option>
+        </select>
         <button class="collapse-btn" onclick={() => (notesOpen = false)} title="Collapse">‹</button>
       </div>
 
       <ul>
-        {#each notes as note (note.id)}
+        {#each sortedNotes as note (note.id)}
           <li class:active={activeNote?.id === note.id} class:locked-row={note.locked}>
             {#if note.locked}
               <span class="row-btn note-title note-locked"><span class="lock-icon">🔒</span>(locked)</span>
@@ -998,6 +1028,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
       <div class="new-item-row">
         <input
+          bind:this={newNoteTitleInputEl}
           bind:value={newNoteTitle}
           placeholder="New note…"
           onkeydown={(e) => e.key === 'Enter' && createNote()}
@@ -1075,6 +1106,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           <button class="graph-toggle" onclick={() => (graphOpen = !graphOpen)}>
             {graphOpen ? '✕ Graph' : 'Graph'}
           </button>
+          <span class="word-count">{wordCount} word{wordCount === 1 ? '' : 's'} · {readingTime} min</span>
         </div>
       </div>
       {#if noteTags.length > 0}

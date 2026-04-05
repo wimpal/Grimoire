@@ -206,14 +206,79 @@ pub async fn remove_note_index(
 }
 
 /// Embed the query text and return the most semantically similar notes.
+///
+/// After the LanceDB search, results are cross-referenced with SQLite to:
+/// 1. Filter out notes in folders that are currently locked (no session key).
+/// 2. Replace the title stored in LanceDB with the current, decrypted title
+///    from SQLite — this fixes stale ciphertext titles left over from notes
+///    that were indexed before encryption was applied (or before migration 0009).
 #[tauri::command]
 pub async fn search_notes(
+    pool: State<'_, SqlitePool>,
+    keys: State<'_, KeyStore>,
     vdb: State<'_, crate::vector::VectorDb>,
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<crate::vector::NoteMatch>, String> {
     let embedding = embed_query(&query).await?;
-    crate::vector::search(&vdb.0, embedding, limit.unwrap_or(crate::vector::CHUNK_FETCH_LIMIT)).await
+    let mut matches = crate::vector::search(
+        &vdb.0,
+        embedding,
+        limit.unwrap_or(crate::vector::CHUNK_FETCH_LIMIT),
+    )
+    .await?;
+
+    if matches.is_empty() {
+        return Ok(matches);
+    }
+
+    // Batch-fetch the current title and lock state for all returned note IDs.
+    let ids: Vec<i64> = matches.iter().map(|m| m.note_id).collect();
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!(
+        "SELECT n.id, n.title, n.folder_id, COALESCE(f.locked, 0) AS folder_locked
+         FROM notes n
+         LEFT JOIN folders f ON f.id = n.folder_id
+         WHERE n.id IN ({placeholders})"
+    );
+    let mut q = sqlx::query_as::<_, (i64, String, Option<i64>, i64)>(&sql);
+    for id in &ids {
+        q = q.bind(id);
+    }
+    let rows = q.fetch_all(pool.inner()).await.map_err(|e| e.to_string())?;
+
+    // Build a map from note_id → decrypted title, skipping locked notes.
+    let mut accessible: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+    for (id, raw_title, folder_id, folder_locked_col) in rows {
+        // Skip notes in currently-locked folders.
+        let locked = folder_locked_col != 0
+            && folder_id
+                .map(|fid| super::folder_is_locked(fid, true, &keys))
+                .unwrap_or(false);
+        if locked {
+            continue;
+        }
+
+        // Decrypt the title if an active key is available for this note.
+        let title = if let Some(key) = super::resolve_key(folder_id, &keys) {
+            crate::crypto::decrypt(&key, &raw_title)
+                .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))
+                .unwrap_or(raw_title)
+        } else {
+            raw_title
+        };
+        accessible.insert(id, title);
+    }
+
+    // Drop locked/missing results; update titles with current decrypted values.
+    matches.retain(|m| accessible.contains_key(&m.note_id));
+    for m in &mut matches {
+        if let Some(title) = accessible.get(&m.note_id) {
+            m.title = title.clone();
+        }
+    }
+
+    Ok(matches)
 }
 
 /// Re-index every note currently in SQLite into LanceDB from scratch.

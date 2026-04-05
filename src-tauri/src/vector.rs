@@ -327,6 +327,17 @@ pub struct RawMatch {
 
 /// Maximum number of distinct notes to include in search results.
 const MAX_SOURCE_NOTES: usize = 5;
+/// Relative distance factor used to suppress tangentially-related results.
+///
+/// After the top-N notes are ranked by lowest chunk distance, any note whose
+/// best distance is more than RELATIVE_DISTANCE_FACTOR times the best note's
+/// distance is dropped. This is model-agnostic: it adapts to whatever distance
+/// scale nomic-embed-text produces rather than relying on a magic absolute number.
+///
+/// 1.40 means: a note is kept only if its distance is within 40% of the best
+/// note's distance. Example — best = 0.50, cutoff = 0.70; a note at 0.68 passes
+/// but a note at 0.72 is dropped.
+const RELATIVE_DISTANCE_FACTOR: f32 = 1.40;
 /// How many raw chunks to retrieve from LanceDB per search.
 /// Must be larger than MAX_SOURCE_NOTES to allow deduplication to work — if a
 /// long note contributes many top-ranked chunks they will all count as one note,
@@ -395,13 +406,19 @@ pub async fn search(
         }
     }
 
-    // Pick the top MAX_SOURCE_NOTES notes by best chunk distance.
+    // Pick the top MAX_SOURCE_NOTES notes by best chunk distance, then drop any
+    // note that is more than RELATIVE_DISTANCE_FACTOR times the best note's distance.
+    // This suppresses tangentially-related results without needing a magic absolute number.
     let mut ranked: Vec<(i64, f32, String)> = best_dist
         .into_iter()
         .map(|(id, (dist, title))| (id, dist, title))
         .collect();
     ranked.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     ranked.truncate(MAX_SOURCE_NOTES);
+    if let Some(best_distance) = ranked.first().map(|(_, d, _)| *d) {
+        let cutoff = best_distance * RELATIVE_DISTANCE_FACTOR;
+        ranked.retain(|(_, d, _)| *d <= cutoff);
+    }
     let top_ids: std::collections::HashSet<i64> = ranked.iter().map(|(id, _, _)| *id).collect();
 
     // Pass 2: collect all chunks that belong to the top notes, preserving chunk order.

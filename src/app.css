@@ -494,6 +494,46 @@ li:hover .icon-btn {
   background: transparent;
 }
 
+.word-count {
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--text);
+  opacity: 0.45;
+  white-space: nowrap;
+  margin-left: 4px;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* ── Sort select (notes panel header) ─────────────────────────────── */
+
+.sort-select {
+  background: none;
+  border: none;
+  font: 11px var(--sans);
+  color: var(--text);
+  opacity: 0.6;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.sort-select:hover {
+  opacity: 1;
+}
+
+/* ── Folder note count badge ──────────────────────────────────────── */
+
+.folder-count {
+  font-size: 11px;
+  color: var(--text);
+  opacity: 0.45;
+  flex-shrink: 0;
+}
+
+li:hover .folder-count {
+  display: none;
+}
+
 .content-area {
   flex: 1;
   padding: 24px;
