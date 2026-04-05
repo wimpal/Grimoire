@@ -266,6 +266,7 @@ pub async fn reindex_all(
         if note.locked {
             continue;
         }
+        super::search::fts_upsert(pool.inner(), note.id, &note.title, &note.content).await;
         let props_suffix = build_properties_suffix(pool.inner(), note.id).await;
         let full_content = if props_suffix.is_empty() {
             note.content.clone()

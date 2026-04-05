@@ -17,6 +17,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
 <script>
   import { invoke } from '@tauri-apps/api/core';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import { onMount } from 'svelte';
   import Chat from './lib/Chat.svelte';
   import Graph from './lib/Graph.svelte';
@@ -26,6 +27,10 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   import NoteProperties from './lib/NoteProperties.svelte';
   import DatabaseView from './lib/DatabaseView.svelte';
   import Settings from './lib/Settings.svelte';
+  import Search from './lib/Search.svelte';
+  import ConfirmModal from './lib/ConfirmModal.svelte';
+
+  const appWindow = getCurrentWindow();
 
   // ── State ──────────────────────────────────────────────────────────────────
 
@@ -64,6 +69,9 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   // Graph overlay
   let graphOpen = $state(false);
+
+  // Search panel
+  let searchOpen = $state(false);
 
   // Seed state
   let isSeeding = $state(false);
@@ -153,6 +161,12 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   // Modal state for folder password management
   // mode: 'set' | 'remove' | null, folderId
   let folderPwModal = $state(null);
+
+  // Pending delete confirmations — null when no dialog is open.
+  // noteDeletePending: id of note awaiting confirmation
+  // folderDeletePending: { id, name } of folder awaiting confirmation
+  let noteDeletePending = $state(null);
+  let folderDeletePending = $state(null);
 
   // Set of folder IDs that have been unlocked in the current session.
   // Used to show the "remove password" button for password-protected folders.
@@ -256,7 +270,13 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   }
 
   async function deleteFolder(id) {
-    if (!confirm('Delete this folder? Notes inside will become unfiled.')) return;
+    const folder = folders.find(f => f.id === id);
+    folderDeletePending = { id, name: folder?.name ?? 'this folder' };
+  }
+
+  async function confirmDeleteFolder() {
+    const id = folderDeletePending.id;
+    folderDeletePending = null;
     try {
       await invoke('delete_folder', { id });
       if (selectedFolderId === id) selectedFolderId = null;
@@ -328,6 +348,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   function openNote(note) {
     // Auto-save unsaved changes before switching to a different note.
     if (isDirty && activeNote && activeNote.id !== note.id) saveNote();
+    searchOpen = false;
     activeNote = note;
     editorTitle = note.title;
     editorContent = note.content;
@@ -418,7 +439,13 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   }
 
   async function deleteNote(id) {
-    if (!confirm('Delete this note?')) return;
+    const note = notes.find(n => n.id === id) ?? activeNote;
+    noteDeletePending = { id, title: note?.title ?? 'this note' };
+  }
+
+  async function confirmDeleteNote() {
+    const id = noteDeletePending.id;
+    noteDeletePending = null;
     try {
       await invoke('delete_note', { id });
       if (activeNote?.id === id) {
@@ -447,6 +474,10 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   // Save on Ctrl+S; lock vault on Ctrl+Shift+L; send selection to chat on Ctrl+Shift+Enter
   function handleKeydown(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'f' && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      searchOpen = true;
+    }
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
       saveNote();
@@ -748,6 +779,83 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   <TemplateModal template={editingTemplate} onSave={updateTemplate} onCancel={() => (editingTemplate = null)} />
 {/if}
 
+{#if noteDeletePending}
+  <ConfirmModal
+    title="Delete note"
+    message={'Are you sure you want to delete \u201c' + noteDeletePending.title + '\u201d?'}
+    confirmLabel="Delete"
+    onConfirm={confirmDeleteNote}
+    onCancel={() => (noteDeletePending = null)}
+  />
+{/if}
+
+{#if folderDeletePending}
+  <ConfirmModal
+    title="Delete folder"
+    message={'Are you sure you want to delete \u201c' + folderDeletePending.name + '\u201d? Notes inside will become unfiled.'}
+    confirmLabel="Delete"
+    onConfirm={confirmDeleteFolder}
+    onCancel={() => (folderDeletePending = null)}
+  />
+{/if}
+
+<!-- ── Custom title bar ──────────────────────────────────────────── -->
+<div class="titlebar">
+  <div class="titlebar-left">
+    <button class="titlebar-btn" onclick={() => (foldersOpen = !foldersOpen)} title="Toggle folders">
+      <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+        <rect x="1" y="1" width="13" height="13" rx="1"/>
+        <line x1="5" y1="1" x2="5" y2="14"/>
+      </svg>
+    </button>
+    <button class="titlebar-btn" onclick={() => (notesOpen = !notesOpen)} title="Toggle notes list">
+      <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+        <line x1="4" y1="4" x2="11" y2="4"/>
+        <line x1="4" y1="7.5" x2="11" y2="7.5"/>
+        <line x1="4" y1="11" x2="9" y2="11"/>
+      </svg>
+    </button>
+    <button class="titlebar-btn" onclick={() => (searchOpen = !searchOpen)} title="Search (Ctrl+F)">
+      <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+        <circle cx="6.5" cy="6.5" r="4.5"/>
+        <line x1="10" y1="10" x2="13.5" y2="13.5"/>
+      </svg>
+    </button>
+  </div>
+
+  <!-- Drag region — clicking and dragging here moves the window -->
+  <div class="titlebar-drag" data-tauri-drag-region>
+    <span class="titlebar-title">Grimoire</span>
+  </div>
+
+  <div class="titlebar-right">
+    <button
+      class="titlebar-btn"
+      class:titlebar-btn-active={chatOpen}
+      onclick={() => (chatOpen = !chatOpen)}
+      title="Toggle chat"
+    >
+      <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M2 2h11a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H5l-3 3V3a1 1 0 0 1 1-1z"/>
+      </svg>
+    </button>
+  </div>
+
+  <div class="titlebar-winctl">
+    <button class="winctl-btn" onclick={() => appWindow.minimize()} title="Minimise" aria-label="Minimise">
+      <svg width="11" height="11" viewBox="0 0 11 11" fill="currentColor"><rect x="0" y="5" width="11" height="1"/></svg>
+    </button>
+    <button class="winctl-btn" onclick={() => appWindow.toggleMaximize()} title="Maximise" aria-label="Maximise">
+      <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="1"><rect x="0.5" y="0.5" width="10" height="10"/></svg>
+    </button>
+    <button class="winctl-btn close" onclick={() => appWindow.close()} title="Close" aria-label="Close">
+      <svg width="11" height="11" viewBox="0 0 11 11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round">
+        <line x1="1" y1="1" x2="10" y2="10"/><line x1="10" y1="1" x2="1" y2="10"/>
+      </svg>
+    </button>
+  </div>
+</div>
+
 <div class="layout" style:grid-template-columns={gridCols}>
   <!-- ── Sidebar: Folders ──────────────────────────────────────────── -->
   <aside class="sidebar" class:collapsed={!foldersOpen}>
@@ -925,7 +1033,18 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   <!-- ── Editor ────────────────────────────────────────────────────── -->
   <main class="editor">
-    {#if activeNote}
+    <!-- Search is always mounted so query/results survive panel close. Hidden via CSS when inactive. -->
+    <div style="display: {searchOpen ? 'contents' : 'none'};">
+      <Search
+        {folders}
+        open={searchOpen}
+        onSelectNote={(id) => {
+          searchOpen = false;
+          openNoteById(id);
+        }}
+      />
+    </div>
+    {#if !searchOpen && activeNote}
       <div class="editor-toolbar">
         <input
           class="title-input"
@@ -955,9 +1074,6 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           {/if}
           <button class="graph-toggle" onclick={() => (graphOpen = !graphOpen)}>
             {graphOpen ? '✕ Graph' : 'Graph'}
-          </button>
-          <button class="chat-toggle" onclick={() => (chatOpen = !chatOpen)}>
-            {chatOpen ? '✕ Chat' : 'Chat'}
           </button>
         </div>
       </div>
@@ -1007,7 +1123,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           {/if}
         </div>
       {/if}
-    {:else}
+    {:else if !searchOpen}
       <div class="editor-toolbar">
         <div class="toolbar-actions">
           {#if folderHasProperties && selectedFolderId && selectedFolderId !== 'all'}
@@ -1017,9 +1133,6 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           {/if}
           <button class="graph-toggle" onclick={() => (graphOpen = !graphOpen)}>
             {graphOpen ? '✕ Graph' : 'Graph'}
-          </button>
-          <button class="chat-toggle" onclick={() => (chatOpen = !chatOpen)}>
-            {chatOpen ? '✕ Chat' : 'Chat'}
           </button>
         </div>
       </div>
@@ -1037,7 +1150,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   </main>
 
   {#if chatOpen}
-    <Chat {activeNote} pendingInsert={chatInsert} keepInMemory={keepModelInMemory} />
+    <Chat {activeNote} pendingInsert={chatInsert} keepInMemory={keepModelInMemory} onClose={() => (chatOpen = false)} />
   {/if}
 </div>
 

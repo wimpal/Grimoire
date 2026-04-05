@@ -48,7 +48,11 @@ pub async fn create_note(
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(map_note_row(row, false, &keys))
+    let note = map_note_row(row, false, &keys);
+    if !note.locked {
+        super::search::fts_upsert(pool.inner(), note.id, &note.title, &note.content).await;
+    }
+    Ok(note)
 }
 
 /// Fetch a single note by id.
@@ -189,7 +193,11 @@ pub async fn update_note(
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(map_note_row(row, folder_locked, &keys))
+    let note = map_note_row(row, folder_locked, &keys);
+    if !note.locked {
+        super::search::fts_upsert(pool.inner(), note.id, &note.title, &note.content).await;
+    }
+    Ok(note)
 }
 
 /// Move a note to a different folder (or to no folder when folder_id is null).
@@ -224,6 +232,7 @@ pub async fn delete_note(pool: State<'_, SqlitePool>, id: i64) -> Result<(), Str
         .await
         .map_err(|e| e.to_string())?;
 
+    super::search::fts_delete(pool.inner(), id).await;
     Ok(())
 }
 

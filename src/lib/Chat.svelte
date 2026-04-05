@@ -25,7 +25,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   // Shape: { id, title, content, ... } | null
   // pendingInsert: { text: string, seq: number } — injected quote from the editor keybind.
   // keepInMemory: when true, keep_alive: -1 is sent so Ollama never unloads the model.
-  let { activeNote = null, pendingInsert = null, keepInMemory = false } = $props();
+  let { activeNote = null, pendingInsert = null, keepInMemory = false, onClose = null } = $props();
 
   // ── State ──────────────────────────────────────────────────────────────────
 
@@ -209,6 +209,9 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       <input type="checkbox" bind:checked={useNotes} />
       Use notes
     </label>
+    {#if onClose}
+      <button class="chat-close-btn" onclick={onClose} aria-label="Close chat">✕</button>
+    {/if}
   </div>
 
   <div class="chat-messages" bind:this={messagesEl}>

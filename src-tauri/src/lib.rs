@@ -53,7 +53,12 @@ pub fn run() {
                 let pool = db::init_db(&app_handle)
                     .await
                     .expect("failed to initialise database");
+                let pool_for_fts = pool.clone();
                 app_handle.manage(pool);
+
+                tauri::async_runtime::spawn(async move {
+                    commands::search::fts_initial_sync(&pool_for_fts).await;
+                });
 
                 let vdb = vector::init(&app_handle)
                     .await
@@ -95,6 +100,8 @@ pub fn run() {
         commands::list_all_tags,
         commands::get_graph_data,
         commands::debug_search,
+        commands::fts_search,
+        commands::combined_search,
         commands::seed_notes,
         commands::list_templates,
         commands::create_template,
@@ -147,6 +154,8 @@ pub fn run() {
         commands::list_notes_by_tag,
         commands::list_all_tags,
         commands::get_graph_data,
+        commands::fts_search,
+        commands::combined_search,
         commands::list_templates,
         commands::create_template,
         commands::update_template,
