@@ -390,7 +390,7 @@ pub async fn debug_search(
 pub async fn seed_notes(
     pool: State<'_, SqlitePool>,
     vdb: State<'_, crate::vector::VectorDb>,
-) -> Result<usize, String> {
+) -> Result<String, String> {
     let seeds: &[(&str, &str)] = &[
         (
             "Rust ownership and borrowing",
@@ -475,6 +475,7 @@ pub async fn seed_notes(
     ];
 
     let mut count = 0usize;
+    let mut indexed = 0usize;
     for (title, content) in seeds {
         let row = sqlx::query_as::<_, NoteRow>(
             "INSERT INTO notes (title, content) VALUES (?, ?)
@@ -485,17 +486,29 @@ pub async fn seed_notes(
         .fetch_one(pool.inner())
         .await
         .map_err(|e| e.to_string())?;
+        count += 1;
 
+        // Embedding is best-effort: seeding should work even without Ollama
         let sentences = split_sentences(&row.content);
         let raw_chunks = chunk_sentences(sentences, 1, 0);
         let mut chunks: Vec<(i32, String, Vec<f32>)> = Vec::new();
+        let mut embed_ok = true;
         for (i, chunk_text) in raw_chunks.into_iter().enumerate() {
-            let embedding = embed_document(&chunk_text).await?;
-            chunks.push((i as i32, chunk_text, embedding));
+            match embed_document(&chunk_text).await {
+                Ok(embedding) => chunks.push((i as i32, chunk_text, embedding)),
+                Err(_) => { embed_ok = false; break; }
+            }
         }
-        crate::vector::upsert(&vdb.0, row.id, &row.title, chunks).await?;
-        count += 1;
+        if embed_ok {
+            if let Ok(()) = crate::vector::upsert(&vdb.0, row.id, &row.title, chunks).await {
+                indexed += 1;
+            }
+        }
     }
 
-    Ok(count)
+    if indexed == count {
+        Ok(format!("{count}"))
+    } else {
+        Ok(format!("{count}:{indexed}"))
+    }
 }
