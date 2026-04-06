@@ -23,6 +23,25 @@ use crate::KeyStore;
 use super::{NoteRow, Note, map_note_row, resolve_key};
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Re-format an ISO date string (`YYYY-MM-DD`) into the user's preferred display
+/// format. Returns the input unchanged for `YYYY-MM-DD` or any unrecognised format.
+fn format_display_date(iso: &str, fmt: &str) -> String {
+    let parts: Vec<&str> = iso.split('-').collect();
+    if parts.len() != 3 {
+        return iso.to_string();
+    }
+    let (y, m, d) = (parts[0], parts[1], parts[2]);
+    match fmt {
+        "DD-MM-YYYY" => format!("{}-{}-{}", d, m, y),
+        "MM-DD-YYYY" => format!("{}-{}-{}", m, d, y),
+        _ => iso.to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Structs
 // ---------------------------------------------------------------------------
 
@@ -158,9 +177,11 @@ pub async fn get_notes_for_day(
 /// Find the daily note for `date_str` inside the "Daily Notes" folder, creating
 /// both the folder and the note if they do not yet exist.
 ///
-/// The stored note title is always `date_str` (ISO 8601: `YYYY-MM-DD`), encrypted
-/// with the vault key when one is active. The "Daily Notes" folder never carries a
-/// per-folder password, so `folder_locked = false` is safe to pass to `map_note_row`.
+/// The stored note title is the date formatted according to `date_format` (e.g.
+/// `DD-MM-YYYY` → `"06-04-2026"`), encrypted with the vault key when one is active.
+/// Legacy notes stored as raw ISO (`YYYY-MM-DD`) are matched as a fallback.
+/// The "Daily Notes" folder never carries a per-folder password, so
+/// `folder_locked = false` is safe to pass to `map_note_row`.
 ///
 /// Because AES-GCM is non-deterministic we cannot query by encrypted title directly.
 /// Instead, all notes in the folder are fetched and decrypted in Rust to find the
@@ -170,8 +191,12 @@ pub async fn get_or_create_daily_note(
     pool: State<'_, SqlitePool>,
     keys: State<'_, KeyStore>,
     date_str: String,
+    date_format: Option<String>,
 ) -> Result<Note, String> {
     let vault_key = resolve_key(None, &keys);
+    let fmt = date_format.as_deref().unwrap_or("DD-MM-YYYY");
+    // Title stored in the note (e.g. "06-04-2026" for DD-MM-YYYY).
+    let display_title = format_display_date(&date_str, fmt);
 
     // ── Step 1: find or create the "Daily Notes" folder ──────────────────────
 
@@ -229,7 +254,8 @@ pub async fn get_or_create_daily_note(
         } else {
             row.title.clone()
         };
-        title == date_str
+        // Match either the display format (new notes) or raw ISO (legacy notes).
+        title == display_title || title == date_str
     });
 
     if let Some(row) = existing {
@@ -237,9 +263,9 @@ pub async fn get_or_create_daily_note(
     }
 
     let stored_title = if let Some(key) = vault_key {
-        crate::crypto::encrypt(&key, date_str.as_bytes())
+        crate::crypto::encrypt(&key, display_title.as_bytes())
     } else {
-        date_str.clone()
+        display_title.clone()
     };
 
     let row = sqlx::query_as::<_, NoteRow>(

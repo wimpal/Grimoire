@@ -22,6 +22,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   import Calendar from './lib/Calendar.svelte';
   import Chat from './lib/Chat.svelte';
   import Graph from './lib/Graph.svelte';
+  import TabBar from './lib/TabBar.svelte';
   import LockScreen from './lib/LockScreen.svelte';
   import PasswordModal from './lib/PasswordModal.svelte';
   import TemplateModal from './lib/TemplateModal.svelte';
@@ -39,6 +40,13 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   let notes = $state([]);
   let selectedFolderId = $state(null); // null = "All notes"
   let activeNote = $state(null);       // the note currently open in the editor
+
+  // ── Tab state ──────────────────────────────────────────────────────────────
+  // Each tab: { id: string, type: 'note'|'graph'|'chat', noteId: number|null, label: string, customLabel: string|null }
+  let tabs = $state([]);
+  let activeTabId = $state(null);
+  let activeTab = $derived(tabs.find(t => t.id === activeTabId) ?? null);
+  function makeTabId() { return Math.random().toString(36).slice(2, 9); }
 
   // Editor fields (kept in sync with activeNote)
   let editorTitle = $state('');
@@ -69,11 +77,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   // Reference to the note editor textarea — used to read the current selection.
   let editorTextareaEl = $state(null);
 
-  // Graph overlay
-  let graphOpen = $state(false);
-
   // Calendar overlay
-  let calendarOpen = $state(false);
+  // (removed — calendar is now a tab type)
 
   // Search panel
   let searchOpen = $state(false);
@@ -113,6 +118,13 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   $effect(() => {
     localStorage.setItem('dailyNoteFormat', dailyNoteFormat);
+  });
+
+  $effect(() => {
+    localStorage.setItem('grimoire_tabs', JSON.stringify({
+      tabs: tabs.map(t => ({ id: t.id, type: t.type, noteId: t.noteId, label: t.label, customLabel: t.customLabel })),
+      activeTabId,
+    }));
   });
 
   $effect(() => {
@@ -278,6 +290,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       await loadNotes();
       loadAllTags();
       loadTemplates();
+      await restoreTabs();
+      if (tabs.length === 0) newTab();
     }
   });
 
@@ -352,8 +366,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           folderHasProperties = defs.length > 0;
         } catch { /* non-fatal */ }
       }
-      openNote(note);
-      // Apply template content after openNote so it overrides the empty content.
+      navigateToNote(note);
+      // Apply template content after navigateToNote so it overrides the empty content.
       const templateContent = template?.content ?? '';
       if (templateContent) {
         editorContent = templateContent;
@@ -388,6 +402,202 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     invoke('get_note_tags', { noteId: note.id }).then(t => (noteTags = t)).catch(() => {});
     invoke('get_note_links', { noteId: note.id }).then(l => (noteLinks = l)).catch(() => {});
     invoke('get_backlinks', { noteId: note.id }).then(b => (noteBacklinks = b)).catch(() => {});
+  }
+
+  // ── Tab helpers ────────────────────────────────────────────────────────────
+
+  // Navigates the active tab to a note (updating it in place).
+  // If no tab exists yet, creates the first one implicitly.
+  // This is called for all normal note navigation (sidebar click, search, links).
+  function navigateToNote(note) {
+    if (isDirty) saveNote();
+    if (!activeTabId || tabs.length === 0) {
+      // No tabs at all — create the first one.
+      const id = makeTabId();
+      tabs = [{ id, type: 'note', noteId: note.id, label: note.title, customLabel: null }];
+      activeTabId = id;
+    } else {
+      // Update the current tab to point to this note.
+      tabs = tabs.map(t => t.id === activeTabId
+        ? { ...t, type: 'note', noteId: note.id, label: note.title }
+        : t
+      );
+    }
+    openNote(note);
+  }
+
+  // Creates a blank tab and activates it (Ctrl+T / + button).
+  function newTab() {
+    const id = makeTabId();
+    tabs = [...tabs, { id, type: 'note', noteId: null, label: 'New Tab', customLabel: null }];
+    activeTabId = id;
+    activeNote = null;
+    editorTitle = '';
+    editorContent = '';
+    isDirty = false;
+    noteTags = [];
+    noteLinks = [];
+    noteBacklinks = [];
+  }
+
+  // Activates an existing tab by ID. Auto-saves the current dirty note first.
+  async function activateTab(id) {
+    if (activeTabId === id) return;
+    if (isDirty) await saveNote();
+    activeTabId = id;
+    const tab = tabs.find(t => t.id === id);
+    if (!tab) return;
+    if (tab.type === 'note' && tab.noteId != null) {
+      try {
+        const note = await invoke('get_note', { id: tab.noteId });
+        openNote(note);
+      } catch (e) {
+        showError(e);
+        closeTab(id);
+      }
+    } else {
+      activeNote = null;
+      editorTitle = '';
+      editorContent = '';
+      isDirty = false;
+      noteTags = [];
+      noteLinks = [];
+      noteBacklinks = [];
+    }
+  }
+
+  // Closes a tab. Auto-saves if dirty, then activates the nearest remaining tab.
+  async function closeTab(id) {
+    const idx = tabs.findIndex(t => t.id === id);
+    if (idx === -1) return;
+    if (id === activeTabId && isDirty) await saveNote();
+    const newTabs = tabs.filter(t => t.id !== id);
+    tabs = newTabs;
+    if (activeTabId === id) {
+      if (newTabs.length === 0) {
+        // Always keep at least one tab — open a fresh New Tab.
+        newTab();
+      } else {
+        const next = newTabs[idx] ?? newTabs[idx - 1];
+        activeTabId = next.id;
+        if (next.type === 'note' && next.noteId != null) {
+          try {
+            const note = await invoke('get_note', { id: next.noteId });
+            openNote(note);
+          } catch {
+            activeNote = null;
+            editorTitle = '';
+            editorContent = '';
+          }
+        } else {
+          activeNote = null;
+          editorTitle = '';
+          editorContent = '';
+          isDirty = false;
+          noteTags = [];
+          noteLinks = [];
+          noteBacklinks = [];
+        }
+      }
+    }
+  }
+
+  // Opens (or activates) a graph tab in the editor column.
+  function openGraphTab() {
+    if (isDirty) saveNote();
+    const existing = tabs.find(t => t.type === 'graph');
+    if (existing) {
+      activeTabId = existing.id;
+      activeNote = null;
+      editorTitle = '';
+      editorContent = '';
+      isDirty = false;
+      return;
+    }
+    const id = makeTabId();
+    tabs = [...tabs, { id, type: 'graph', noteId: null, label: 'Graph', customLabel: null }];
+    activeTabId = id;
+    activeNote = null;
+    editorTitle = '';
+    editorContent = '';
+    isDirty = false;
+  }
+
+  // Opens (or activates) a calendar tab in the editor column.
+  function openCalendarTab() {
+    if (isDirty) saveNote();
+    const existing = tabs.find(t => t.type === 'calendar');
+    if (existing) {
+      activeTabId = existing.id;
+      activeNote = null;
+      editorTitle = '';
+      editorContent = '';
+      isDirty = false;
+      return;
+    }
+    const id = makeTabId();
+    tabs = [...tabs, { id, type: 'calendar', noteId: null, label: 'Calendar', customLabel: null }];
+    activeTabId = id;
+    activeNote = null;
+    editorTitle = '';
+    editorContent = '';
+    isDirty = false;
+  }
+
+  // Opens (or activates) a chat tab in the editor column.
+  function openChatTab() {
+    if (isDirty) saveNote();
+    const existing = tabs.find(t => t.type === 'chat');
+    if (existing) {
+      activeTabId = existing.id;
+      activeNote = null;
+      editorTitle = '';
+      editorContent = '';
+      isDirty = false;
+      return;
+    }
+    const id = makeTabId();
+    tabs = [...tabs, { id, type: 'chat', noteId: null, label: 'Chat', customLabel: null }];
+    activeTabId = id;
+    activeNote = null;
+    editorTitle = '';
+    editorContent = '';
+    isDirty = false;
+  }
+
+  // Sets a custom display label for a tab (double-click rename in TabBar).
+  function renameTab(id, label) {
+    tabs = tabs.map(t => t.id === id ? { ...t, customLabel: label || null } : t);
+  }
+
+  // Restores tabs from localStorage after the vault is unlocked.
+  async function restoreTabs() {
+    try {
+      const saved = localStorage.getItem('grimoire_tabs');
+      if (!saved) return;
+      const { tabs: savedTabs, activeTabId: savedActiveId } = JSON.parse(saved);
+      if (!Array.isArray(savedTabs) || savedTabs.length === 0) return;
+      const restored = [];
+      for (const t of savedTabs) {
+        if (t.type === 'note' && t.noteId != null) {
+          try {
+            const note = await invoke('get_note', { id: t.noteId });
+            restored.push({ ...t, label: note.title });
+          } catch { /* Note was deleted — drop it */ }
+        } else if (t.type === 'graph') {
+          restored.push(t);
+        }
+        // Chat tabs are not restored (no persistent content).
+      }
+      if (restored.length === 0) return;
+      tabs = restored;
+      const target = restored.find(t => t.id === savedActiveId) ?? restored[restored.length - 1];
+      activeTabId = target.id;
+      if (target.type === 'note' && target.noteId != null) {
+        const note = await invoke('get_note', { id: target.noteId });
+        openNote(note);
+      }
+    } catch { /* Malformed localStorage data — start fresh */ }
   }
 
   // ── Template actions ───────────────────────────────────────────────────────
@@ -474,7 +684,9 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     noteDeletePending = null;
     try {
       await invoke('delete_note', { id });
-      if (activeNote?.id === id) {
+      const tab = tabs.find(t => t.type === 'note' && t.noteId === id);
+      if (tab) await closeTab(tab.id);
+      else if (activeNote?.id === id) {
         activeNote = null;
         editorTitle = '';
         editorContent = '';
@@ -509,6 +721,14 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       notesOpen = true;
       // Svelte may not have rendered the panel yet; wait a frame before focusing.
       requestAnimationFrame(() => newNoteTitleInputEl?.focus());
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 't' && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      newTab();
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'w' && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      if (activeTabId) closeTab(activeTabId);
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
@@ -561,7 +781,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   async function openNoteById(id) {
     try {
       const note = await invoke('get_note', { id });
-      openNote(note);
+      navigateToNote(note);
     } catch (e) {
       showError(e);
     }
@@ -585,6 +805,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     await loadFolders();
     await loadNotes();
     loadAllTags();
+    await restoreTabs();
+    if (tabs.length === 0) newTab();
     // Re-index notes now that the vault is open.
     invoke('reindex_all').catch(() => {});
   }
@@ -595,6 +817,11 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       await invoke('lock_vault');
       vaultLocked = true;
       activeNote = null;
+      editorTitle = '';
+      editorContent = '';
+      isDirty = false;
+      tabs = [];
+      activeTabId = null;
       notes = [];
       folders = [];
       allTags = [];
@@ -855,10 +1082,15 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     </button>
   </div>
 
-  <!-- Drag region — clicking and dragging here moves the window -->
-  <div class="titlebar-drag" data-tauri-drag-region>
-    <span class="titlebar-title">Grimoire</span>
-  </div>
+  <!-- Tab strip — replaces the old "Grimoire" drag region -->
+  <TabBar
+    {tabs}
+    {activeTabId}
+    onActivate={activateTab}
+    onClose={closeTab}
+    onRename={renameTab}
+    onNew={newTab}
+  />
 
   <div class="titlebar-right">
     <button
@@ -1026,7 +1258,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
             {#if note.locked}
               <span class="row-btn note-title note-locked"><span class="lock-icon">🔒</span>(locked)</span>
             {:else}
-              <button class="row-btn note-title" onclick={() => openNote(note)}>{note.title}</button>
+              <button class="row-btn note-title" onclick={() => navigateToNote(note)}>{note.title}</button>
               <button class="icon-btn danger" onclick={() => deleteNote(note.id)} title="Delete note">✕</button>
             {/if}
           </li>
@@ -1084,7 +1316,29 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         }}
       />
     </div>
-    {#if !searchOpen && activeNote}
+    {#if !searchOpen}
+      {#if activeTab?.type === 'graph'}
+        <div class="tab-fullview">
+          <button class="tab-fullview-close" onclick={() => closeTab(activeTabId)} title="Close graph">✕ Close</button>
+          <Graph
+            activeNoteId={activeNote?.id ?? null}
+            {theme}
+            onSelectNote={(id) => openNoteById(id)}
+          />
+        </div>
+      {:else if activeTab?.type === 'calendar'}
+        <div class="tab-fullview">
+          <button class="tab-fullview-close" onclick={() => closeTab(activeTabId)} title="Close calendar">✕ Close</button>
+          <Calendar
+            onSelectNote={(note) => navigateToNote(note)}
+            onRefresh={() => { loadFolders(); loadNotes(); }}
+            onSelectFolder={(id) => selectFolder(id)}
+            dateFormat={dailyNoteFormat}
+          />
+        </div>
+      {:else if activeTab?.type === 'chat'}
+        <Chat activeNote={null} pendingInsert={null} keepInMemory={keepModelInMemory} onClose={() => closeTab(activeTabId)} />
+      {:else if activeNote}
       <div class="editor-toolbar">
         <input
           class="title-input"
@@ -1112,10 +1366,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
               ← Table
             </button>
           {/if}
-          <button class="graph-toggle" onclick={() => (graphOpen = !graphOpen)}>
-            {graphOpen ? '✕ Graph' : 'Graph'}
-          </button>
-          <button class="graph-toggle" onclick={() => (calendarOpen = !calendarOpen)}>Calendar</button>
+          <button class="graph-toggle" onclick={openGraphTab}>Graph</button>
+          <button class="graph-toggle" onclick={openCalendarTab}>Calendar</button>
           <span class="word-count">{wordCount} word{wordCount === 1 ? '' : 's'} · {readingTime} min</span>
         </div>
       </div>
@@ -1165,7 +1417,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           {/if}
         </div>
       {/if}
-    {:else if !searchOpen}
+    {:else}
       <div class="editor-toolbar">
         <div class="toolbar-actions">
           {#if folderHasProperties && selectedFolderId && selectedFolderId !== 'all'}
@@ -1173,10 +1425,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
               {tableViewOpen ? '✕ Table' : 'Table'}
             </button>
           {/if}
-          <button class="graph-toggle" onclick={() => (graphOpen = !graphOpen)}>
-            {graphOpen ? '✕ Graph' : 'Graph'}
-          </button>
-          <button class="graph-toggle" onclick={() => (calendarOpen = !calendarOpen)}>Calendar</button>
+          <button class="graph-toggle" onclick={openGraphTab}>Graph</button>
+          <button class="graph-toggle" onclick={openCalendarTab}>Calendar</button>
         </div>
       </div>
       {#if tableViewOpen && selectedFolderId && selectedFolderId !== 'all'}        {#key dbKey}
@@ -1189,38 +1439,13 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         <div class="empty-editor">Select or create a note</div>
       {/if}
     {/if}
+    {/if}
   </main>
 
-  {#if chatOpen}
+  {#if chatOpen && activeTab?.type !== 'chat'}
     <Chat {activeNote} pendingInsert={chatInsert} keepInMemory={keepModelInMemory} onClose={() => (chatOpen = false)} />
   {/if}
 </div>
-
-{#if graphOpen}
-  <div class="graph-overlay">
-    <button class="graph-close" onclick={() => (graphOpen = false)}>✕ Close</button>
-    <Graph
-      activeNoteId={activeNote?.id ?? null}
-      {theme}
-      onSelectNote={(id) => {
-        invoke('get_note', { id })
-          .then(note => { openNote(note); graphOpen = false; })
-          .catch(e => showError(e));
-      }}
-    />
-  </div>
-{/if}
-
-{#if calendarOpen}
-  <Calendar
-    open={calendarOpen}
-    onClose={() => (calendarOpen = false)}
-    onSelectNote={(note) => { openNote(note); calendarOpen = false; }}
-    onRefresh={() => { loadFolders(); loadNotes(); }}
-    onSelectFolder={(id) => selectFolder(id)}
-    dateFormat={dailyNoteFormat}
-  />
-{/if}
 
 {#if settingsOpen}
   <Settings

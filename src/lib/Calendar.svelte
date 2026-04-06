@@ -20,15 +20,13 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   /**
    * @type {{
-   *   open: boolean,
-   *   onClose: () => void,
    *   onSelectNote: (note: object) => void,
    *   onRefresh: () => void,
    *   onSelectFolder: (id: number) => void,
    *   dateFormat: string
    * }}
    */
-  let { open, onClose, onSelectNote, onRefresh, onSelectFolder, dateFormat = 'DD-MM-YYYY' } = $props();
+  let { onSelectNote, onRefresh, onSelectFolder, dateFormat = 'DD-MM-YYYY' } = $props();
 
   // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -66,6 +64,28 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   /** All notes in the vault — fetched independently of the current sidebar selection. */
   let allNotes = $state([]);
 
+  // Tooltip state — single floating tooltip driven by mouse position.
+  let tooltipText = $state('');
+  let tooltipX = $state(0);
+  let tooltipY = $state(0);
+  let tooltipVisible = $state(false);
+
+  function showTooltip(e, text) {
+    tooltipText = text;
+    tooltipX = e.clientX;
+    tooltipY = e.clientY;
+    tooltipVisible = true;
+  }
+
+  function moveTooltip(e) {
+    tooltipX = e.clientX;
+    tooltipY = e.clientY;
+  }
+
+  function hideTooltip() {
+    tooltipVisible = false;
+  }
+
   // ── Date helpers ───────────────────────────────────────────────────────────
 
   /** Convert a Date object to a YYYY-MM-DD string in local time. */
@@ -90,13 +110,24 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   /**
    * Set of ISO date strings that have a daily note.
-   * Daily notes are identified by a title matching YYYY-MM-DD exactly.
+   * Daily notes are identified by a title matching any supported date format.
+   * The Set contains ISO (YYYY-MM-DD) strings so comparisons with cellISO() work
+   * regardless of which format the note was stored in.
    */
+  function titleToISO(title) {
+    // Already ISO: YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}$/.test(title)) return title;
+    const [a, b, c] = title.split('-');
+    if (dateFormat === 'DD-MM-YYYY') return `${c}-${b}-${a}`;
+    if (dateFormat === 'MM-DD-YYYY') return `${c}-${a}-${b}`;
+    return title;
+  }
+
   let dailyNoteDates = $derived(
     new Set(
       allNotes
-        .filter(n => !n.locked && /^\d{4}-\d{2}-\d{2}$/.test(n.title))
-        .map(n => n.title)
+        .filter(n => !n.locked && /^\d{2,4}-\d{2}-\d{2,4}$/.test(n.title))
+        .map(n => titleToISO(n.title))
     )
   );
 
@@ -218,8 +249,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   // ── Effects ────────────────────────────────────────────────────────────────
 
   $effect(() => {
-    if (!open) return;
-    // Reset UI state each time the overlay is opened.
+    // Load data when the component mounts.
     const now = new Date();
     viewYear = now.getFullYear();
     viewMonth = now.getMonth();
@@ -259,12 +289,11 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   async function openDay(day) {
     if (isCellFuture(day)) return;
     try {
-      const note = await invoke('get_or_create_daily_note', { dateStr: cellISO(day) });
+      const note = await invoke('get_or_create_daily_note', { dateStr: cellISO(day), dateFormat });
       await onRefresh();
       // Select the Daily Notes folder in the sidebar so the note is visible.
       if (note.folder_id != null) onSelectFolder(note.folder_id);
       onSelectNote(note);
-      onClose();
     } catch (e) {
       console.error('Calendar: failed to open daily note', e);
     }
@@ -280,7 +309,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   }
 </script>
 
-<div class="calendar-overlay" role="dialog" aria-modal="true" aria-label="Calendar">
+<div class="calendar-overlay" role="region" aria-label="Calendar">
 
   <!-- ── Header ───────────────────────────────────────────────────────────── -->
   <div class="cal-header">
@@ -300,7 +329,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         onclick={() => (subView = 'heatmap')}
       >Activity</button>
     </div>
-    <button class="cal-close" onclick={onClose}>✕ Close</button>
+    <!-- Close button is provided by the tab-fullview-close button in App.svelte -->
   </div>
 
   <!-- ── Body ─────────────────────────────────────────────────────────────── -->
@@ -393,13 +422,10 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
                           role="gridcell"
                           aria-label="{cell.date}: {cell.created} created, {cell.modified} modified"
                           onclick={() => cell.total > 0 && selectHeatmapDay(cell.date)}
+                          onmouseenter={cell.total > 0 ? (e) => showTooltip(e, `${formatDateStr(cell.date)}\n${cell.created} created \u00b7 ${cell.modified} modified`) : null}
+                          onmousemove={cell.total > 0 ? moveTooltip : null}
+                          onmouseleave={cell.total > 0 ? hideTooltip : null}
                         >
-                          {#if cell.total > 0}
-                            <div class="heat-tooltip" aria-hidden="true">
-                              {formatDateStr(cell.date)}<br>
-                              {cell.created} created · {cell.modified} modified
-                            </div>
-                          {/if}
                         </button>
                       {/if}
                     {/each}
@@ -422,7 +448,16 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           </div>
         </div>
 
-        <!-- Right: always-visible detail sidebar -->
+        <!-- JS-driven floating tooltip (escapes all overflow contexts) -->
+        {#if tooltipVisible}
+          <div
+            class="heat-tooltip-float"
+            style="left: {tooltipX}px; top: {tooltipY}px;"
+            aria-hidden="true"
+          >{@html tooltipText.replace('\n', '<br>')}</div>
+        {/if}
+
+        <!-- Detail panel below the heatmap -->
         <div class="heat-sidebar" role="region" aria-label="Day detail" aria-live="polite">
           {#if selectedHeatmapDay}
             <div class="heat-detail-header">
@@ -436,7 +471,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
                 {#each dayNotes as note}
                   <button
                     class="heat-note-pill"
-                    onclick={() => { onSelectNote(note); onClose(); }}
+                    onclick={() => { onSelectNote(note); }}
                   >{note.locked ? '🔒 Locked note' : note.title}</button>
                 {/each}
               </div>
@@ -456,16 +491,12 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   /* ── Overlay ─────────────────────────────────────────────────────────────── */
 
   .calendar-overlay {
-    position: fixed;
-    top: 36px;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 100;
-    background: var(--bg);
+    flex: 1;
     display: flex;
     flex-direction: column;
     font-family: var(--sans);
+    overflow: hidden;
+    min-height: 0;
   }
 
   /* ── Header ─────────────────────────────────────────────────────────────── */
@@ -503,21 +534,6 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     color: var(--accent);
     border-bottom-color: var(--accent);
     font-weight: 600;
-  }
-
-  .cal-close {
-    padding: 5px 12px;
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    background: var(--bg2);
-    color: var(--text);
-    font-size: 12px;
-    cursor: pointer;
-  }
-
-  .cal-close:hover {
-    background: var(--bg3);
-    color: var(--text-h);
   }
 
   /* ── Body ───────────────────────────────────────────────────────────────── */
@@ -662,18 +678,20 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   .heat-view {
     display: flex;
-    flex-direction: row;
+    flex-direction: column;
     flex: 1;
-    overflow: hidden;
+    overflow-y: auto;
+    align-items: center;
   }
 
-  /* Heatmap area — scrollable if the window is very narrow */
+  /* Heatmap area — natural height, centred */
   .heat-left {
-    flex: 1;
-    overflow: auto;
-    padding: 40px;
+    flex: 0 0 auto;
+    overflow: visible;
+    padding: 40px 40px 20px;
     display: flex;
     align-items: flex-start;
+    justify-content: center;
   }
 
   .heat-layout {
@@ -767,13 +785,10 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   .heat-3 { background: color-mix(in srgb, var(--accent) 65%, var(--bg3)); }
   .heat-4 { background: var(--accent); }
 
-  /* Tooltip — shown on cell hover, no JS required */
-  .heat-tooltip {
-    display: none;
-    position: absolute;
-    bottom: calc(100% + 6px);
-    left: 50%;
-    transform: translateX(-50%);
+  /* Tooltip — JS-driven floating element, escapes all overflow contexts */
+  .heat-tooltip-float {
+    position: fixed;
+    transform: translate(-50%, calc(-100% - 10px));
     background: var(--bg2);
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -782,12 +797,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     line-height: 1.5;
     color: var(--text-h);
     white-space: nowrap;
-    z-index: 10;
+    z-index: 200;
     pointer-events: none;
-  }
-
-  .heat-cell:hover .heat-tooltip {
-    display: block;
   }
 
   /* Legend */
@@ -808,12 +819,14 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   /* ── Heatmap day detail sidebar ─────────────────────────────────────────── */
 
   .heat-sidebar {
-    width: 280px;
-    flex-shrink: 0;
-    border-left: 1px solid var(--border);
+    width: 100%;
+    max-width: 900px;
+    border-left: none;
+    border-top: 1px solid var(--border);
     overflow-y: auto;
     display: flex;
     flex-direction: column;
+    flex: 1;
   }
 
   .heat-sidebar-empty {
