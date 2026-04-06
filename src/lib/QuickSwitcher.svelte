@@ -1,0 +1,194 @@
+<!-- Copyright (C) 2026 Wim Palland
+
+This file is part of Grimoire.
+
+Grimoire is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+Grimoire is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
+
+<script>
+  import { invoke } from '@tauri-apps/api/core';
+
+  /**
+   * @type {{
+   *   onSelect: (note: object) => void,
+   *   onClose: () => void,
+   * }}
+   */
+  let { onSelect, onClose } = $props();
+
+  let query = $state('');
+  let allNotes = $state([]);
+  let selectedIndex = $state(0);
+  let inputEl = $state(null);
+
+  const filtered = $derived.by(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return allNotes.slice(0, 20);
+    return allNotes
+      .filter(n => !n.locked && n.title.toLowerCase().includes(q))
+      .slice(0, 20);
+  });
+
+  $effect(() => {
+    invoke('list_notes', { all: true })
+      .then(notes => { allNotes = notes; })
+      .catch(() => {});
+  });
+
+  // Reset selected index whenever filter results change.
+  $effect(() => {
+    // reference filtered to track it
+    filtered;
+    selectedIndex = 0;
+  });
+
+  $effect(() => {
+    if (inputEl) inputEl.focus();
+  });
+
+  function handleKeydown(e) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      onClose();
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      selectedIndex = Math.min(selectedIndex + 1, filtered.length - 1);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      selectedIndex = Math.max(selectedIndex - 1, 0);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (filtered[selectedIndex]) {
+        onSelect(filtered[selectedIndex]);
+        onClose();
+      }
+    }
+  }
+</script>
+
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="qs-backdrop" onclick={onClose} role="dialog" aria-modal="true" aria-label="Quick Switcher" tabindex="-1">
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div class="qs-panel" onclick={(e) => e.stopPropagation()}>
+    <input
+      bind:this={inputEl}
+      bind:value={query}
+      class="qs-input"
+      placeholder="Search notes…"
+      autocomplete="off"
+      spellcheck="false"
+      onkeydown={handleKeydown}
+      aria-label="Search notes"
+      aria-autocomplete="list"
+      aria-controls="qs-results"
+    />
+    <ul class="qs-results" id="qs-results" role="listbox">
+      {#each filtered as note, i (note.id)}
+        <li
+          class="qs-item"
+          class:selected={i === selectedIndex}
+          role="option"
+          aria-selected={i === selectedIndex}
+        >
+          <button
+            class="qs-item-btn"
+            onclick={() => { onSelect(note); onClose(); }}
+            onmouseenter={() => { selectedIndex = i; }}
+          >{note.title}</button>
+        </li>
+      {:else}
+        <li class="qs-empty">No matching notes</li>
+      {/each}
+    </ul>
+  </div>
+</div>
+
+<style>
+  .qs-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 300;
+    background: rgba(0, 0, 0, 0.45);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 120px;
+  }
+
+  .qs-panel {
+    width: 520px;
+    max-width: calc(100vw - 40px);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .qs-input {
+    width: 100%;
+    padding: 12px 16px;
+    background: var(--bg);
+    border: none;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-h);
+    font: 14px var(--sans);
+    outline: none;
+    box-sizing: border-box;
+  }
+
+  .qs-input::placeholder {
+    color: var(--text-muted, var(--text));
+    opacity: 0.5;
+  }
+
+  .qs-results {
+    list-style: none;
+    margin: 0;
+    padding: 4px 0;
+    max-height: 320px;
+    overflow-y: auto;
+  }
+
+  .qs-item {
+    display: flex;
+  }
+
+  .qs-item-btn {
+    flex: 1;
+    background: none;
+    border: none;
+    padding: 8px 16px;
+    text-align: left;
+    color: var(--text);
+    font: 13px var(--sans);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .qs-item.selected .qs-item-btn,
+  .qs-item-btn:hover {
+    background: var(--accent-bg);
+    color: var(--accent);
+  }
+
+  .qs-empty {
+    padding: 10px 16px;
+    color: var(--text);
+    font: 13px var(--sans);
+    opacity: 0.5;
+  }
+</style>

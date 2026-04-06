@@ -19,6 +19,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   import { invoke } from '@tauri-apps/api/core';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { onMount } from 'svelte';
+  import { marked } from 'marked';
   import Calendar from './lib/Calendar.svelte';
   import Chat from './lib/Chat.svelte';
   import Graph from './lib/Graph.svelte';
@@ -31,6 +32,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   import Settings from './lib/Settings.svelte';
   import Search from './lib/Search.svelte';
   import ConfirmModal from './lib/ConfirmModal.svelte';
+  import QuickSwitcher from './lib/QuickSwitcher.svelte';
 
   const appWindow = getCurrentWindow();
 
@@ -145,6 +147,13 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       root.setAttribute('data-theme', theme);
     }
   });
+
+  // Drag-and-drop
+  let dragOverFolderId = $state(null); // folder ID currently being hovered during a note drag
+  let isDragging = $state(false);      // true while a note drag is in progress
+
+  // Quick Switcher
+  let quickSwitcherOpen = $state(false);
 
   // Database / table view
   let tableViewOpen = $state(false);
@@ -406,6 +415,12 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   // ── Tab helpers ────────────────────────────────────────────────────────────
 
+  // Toggles edit/read mode for the active tab.
+  function toggleReadMode() {
+    if (!activeTabId) return;
+    tabs = tabs.map(t => t.id === activeTabId ? { ...t, readMode: !t.readMode } : t);
+  }
+
   // Navigates the active tab to a note (updating it in place).
   // If no tab exists yet, creates the first one implicitly.
   // This is called for all normal note navigation (sidebar click, search, links).
@@ -414,7 +429,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     if (!activeTabId || tabs.length === 0) {
       // No tabs at all — create the first one.
       const id = makeTabId();
-      tabs = [{ id, type: 'note', noteId: note.id, label: note.title, customLabel: null }];
+      tabs = [{ id, type: 'note', noteId: note.id, label: note.title, customLabel: null, readMode: false }];
       activeTabId = id;
     } else {
       // Update the current tab to point to this note.
@@ -429,7 +444,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   // Creates a blank tab and activates it (Ctrl+T / + button).
   function newTab() {
     const id = makeTabId();
-    tabs = [...tabs, { id, type: 'note', noteId: null, label: 'New Tab', customLabel: null }];
+    tabs = [...tabs, { id, type: 'note', noteId: null, label: 'New Tab', customLabel: null, readMode: false }];
     activeTabId = id;
     activeNote = null;
     editorTitle = '';
@@ -710,8 +725,37 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     }
   }
 
+  function onNoteDragStart(e, note) {
+    e.dataTransfer.setData('text/plain', String(note.id));
+    e.dataTransfer.effectAllowed = 'move';
+    isDragging = true;
+  }
+
+  function onNoteDragEnd() {
+    isDragging = false;
+    dragOverFolderId = null;
+  }
+
+  function onFolderDragOver(e, folderId) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    dragOverFolderId = folderId;
+  }
+
+  async function onFolderDrop(e, folderId) {
+    e.preventDefault();
+    dragOverFolderId = null;
+    const noteId = Number(e.dataTransfer.getData('text/plain'));
+    if (!noteId) return;
+    await moveNote(noteId, folderId);
+  }
+
   // Save on Ctrl+S; lock vault on Ctrl+Shift+L; send selection to chat on Ctrl+Shift+Enter
   function handleKeydown(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'p' && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      quickSwitcherOpen = true;
+    }
     if ((e.ctrlKey || e.metaKey) && e.key === 'f' && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       searchOpen = true;
@@ -729,6 +773,15 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     if ((e.ctrlKey || e.metaKey) && e.key === 'w' && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       if (activeTabId) closeTab(activeTabId);
+    }
+    if (e.key === 'Delete' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const tag = /** @type {HTMLElement} */ (document.activeElement)?.tagName ?? '';
+      const isEditing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+        || /** @type {HTMLElement} */ (document.activeElement)?.isContentEditable;
+      if (!isEditing && activeNote && !activeNote.locked) {
+        e.preventDefault();
+        deleteNote(activeNote.id);
+      }
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
@@ -1137,7 +1190,15 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           <button class="row-btn" onclick={() => selectFolder(null)}>Unfiled</button>
         </li>
         {#each folders as folder (folder.id)}
-          <li class:active={selectedFolderId === folder.id} class:locked-row={folder.locked}>
+          <li
+            class:active={selectedFolderId === folder.id}
+            class:locked-row={folder.locked}
+            class:drag-over={dragOverFolderId === folder.id}
+            class:drag-active={isDragging && !folder.locked}
+            ondragover={(e) => !folder.locked && onFolderDragOver(e, folder.id)}
+            ondragleave={(e) => { if (dragOverFolderId === folder.id && !e.currentTarget.contains(/** @type {Node} */ (e.relatedTarget))) dragOverFolderId = null; }}
+            ondrop={(e) => !folder.locked && onFolderDrop(e, folder.id)}
+          >
             {#if folder.locked}
               <button class="row-btn folder-name" onclick={() => requestFolderUnlock(folder)}>
                 <span class="lock-icon">🔒</span>{folder.name === '<locked>' ? '(locked folder)' : folder.name}
@@ -1254,10 +1315,21 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
       <ul>
         {#each sortedNotes as note (note.id)}
-          <li class:active={activeNote?.id === note.id} class:locked-row={note.locked}>
+          <li
+            class:active={activeNote?.id === note.id}
+            class:locked-row={note.locked}
+          >
             {#if note.locked}
               <span class="row-btn note-title note-locked"><span class="lock-icon">🔒</span>(locked)</span>
             {:else}
+              <span
+                class="drag-handle"
+                draggable="true"
+                ondragstart={(e) => onNoteDragStart(e, note)}
+                ondragend={onNoteDragEnd}
+                title="Drag to move"
+                aria-hidden="true"
+              >⠇</span>
               <button class="row-btn note-title" onclick={() => navigateToNote(note)}>{note.title}</button>
               <button class="icon-btn danger" onclick={() => deleteNote(note.id)} title="Delete note">✕</button>
             {/if}
@@ -1368,6 +1440,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           {/if}
           <button class="graph-toggle" onclick={openGraphTab}>Graph</button>
           <button class="graph-toggle" onclick={openCalendarTab}>Calendar</button>
+          <button class="graph-toggle" onclick={toggleReadMode}>{activeTab?.readMode ? 'Edit' : 'Read'}</button>
           <span class="word-count">{wordCount} word{wordCount === 1 ? '' : 's'} · {readingTime} min</span>
         </div>
       </div>
@@ -1388,14 +1461,18 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         {/key}
       {/if}
       {#if propertiesReady}
-        <textarea
-          class="content-area"
-          bind:this={editorTextareaEl}
-          bind:value={editorContent}
-          oninput={markDirty}
-          onkeydown={handleEditorKeydown}
-          placeholder="Write your note…"
-        ></textarea>
+        {#if activeTab?.readMode}
+          <div class="content-area read-mode-content">{@html marked.parse(editorContent || '')}</div>
+        {:else}
+          <textarea
+            class="content-area"
+            bind:this={editorTextareaEl}
+            bind:value={editorContent}
+            oninput={markDirty}
+            onkeydown={handleEditorKeydown}
+            placeholder="Write your note…"
+          ></textarea>
+        {/if}
       {/if}
       {#if noteLinks.length > 0 || noteBacklinks.length > 0}
         <div class="note-footer">
@@ -1446,6 +1523,13 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     <Chat {activeNote} pendingInsert={chatInsert} keepInMemory={keepModelInMemory} onClose={() => (chatOpen = false)} />
   {/if}
 </div>
+
+{#if quickSwitcherOpen}
+  <QuickSwitcher
+    onSelect={(note) => navigateToNote(note)}
+    onClose={() => (quickSwitcherOpen = false)}
+  />
+{/if}
 
 {#if settingsOpen}
   <Settings

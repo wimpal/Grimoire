@@ -372,6 +372,18 @@ h2 {
   color: var(--accent);
 }
 
+.folder-list li.drag-over {
+  background: var(--accent-bg);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* Disable pointer events on folder row children while a note drag is active.
+   This makes the <li> itself the unobstructed drop target. */
+.folder-list li.drag-active > * {
+  pointer-events: none;
+}
+
 /* Base style for buttons used as clickable rows */
 .row-btn {
   flex: 1;
@@ -516,6 +528,30 @@ h2 {
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+}
+
+.drag-handle {
+  flex-shrink: 0;
+  cursor: grab;
+  color: var(--text);
+  opacity: 0;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+  user-select: none;
+  transition: opacity 0.1s;
+}
+
+.note-list li:hover .drag-handle {
+  opacity: 0.35;
+}
+
+.drag-handle:hover {
+  opacity: 0.7 !important;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
 }
 
 /* ── Shared: new-item row ─────────────────────────────────────────── */
@@ -693,6 +729,72 @@ li:hover .folder-count {
   color: var(--text-h);
   background: var(--bg);
   outline: none;
+}
+
+/* Read mode: renders Markdown as HTML in place of the textarea */
+.read-mode-content {
+  overflow-y: auto;
+  cursor: default;
+  resize: none;
+}
+
+.read-mode-content h1,
+.read-mode-content h2,
+.read-mode-content h3,
+.read-mode-content h4 {
+  font-family: var(--sans);
+  color: var(--text-h);
+  margin: 1.2em 0 0.4em;
+}
+
+.read-mode-content p {
+  margin: 0 0 0.8em;
+}
+
+.read-mode-content ul,
+.read-mode-content ol {
+  padding-left: 1.6em;
+  margin: 0 0 0.8em;
+}
+
+.read-mode-content code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  background: var(--bg2);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.read-mode-content pre {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 12px 16px;
+  overflow-x: auto;
+  margin: 0 0 0.8em;
+}
+
+.read-mode-content pre code {
+  background: none;
+  padding: 0;
+}
+
+.read-mode-content blockquote {
+  border-left: 3px solid var(--accent);
+  margin: 0 0 0.8em;
+  padding: 4px 0 4px 14px;
+  color: var(--text);
+}
+
+.read-mode-content hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.2em 0;
+}
+
+.read-mode-content a {
+  color: var(--accent);
+  text-decoration: underline;
 }
 
 .empty-editor {

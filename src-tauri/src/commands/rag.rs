@@ -463,14 +463,24 @@ pub async fn seed_notes(
         ),
         (
             "Zettelkasten note-taking method",
-            "Zettelkasten is a note-taking method developed by sociologist Niklas Luhmann, who \
-            used it to write over 70 books. Each note (zettel) contains a single atomic idea and \
-            is linked to related notes by reference. Notes are not organised into folders or \
-            topics — meaning emerges from the link structure. There are three types: fleeting \
-            notes (quick captures), literature notes (from sources), and permanent notes \
-            (processed ideas in your own words). The method is designed to build a personal \
-            knowledge graph over time, with the network of links surfacing non-obvious \
-            connections between ideas.",
+            "# Zettelkasten\n\n\
+            Zettelkasten is a note-taking method developed by sociologist **Niklas Luhmann**, who \
+            used it to write over 70 books.\n\n\
+            ## Core idea\n\n\
+            Each note (*zettel*) contains a **single atomic idea** and is linked to related notes \
+            by reference. Notes are not organised into folders or topics — meaning emerges from \
+            the link structure.\n\n\
+            ## Note types\n\n\
+            1. **Fleeting notes** — quick captures, disposable\n\
+            2. **Literature notes** — summaries from sources, in your own words\n\
+            3. **Permanent notes** — processed ideas, written as if to a reader\n\n\
+            ## Why it works\n\n\
+            > The method is designed to build a personal knowledge graph over time, with the \
+            network of links surfacing non-obvious connections between ideas.\n\n\
+            Links between notes create a `web of knowledge` rather than a hierarchy. \
+            Over years, the network becomes a reliable thinking partner.\n\n\
+            ---\n\n\
+            **See also:** [[How Transformer models work]], [[Sleep and cognitive performance]]",
         ),
     ];
 
