@@ -16,7 +16,7 @@ You should have received a copy of the GNU General Public License
 along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
 <script>
-  let { onClose, vaultHasPassword = false, onSetVaultPassword, onChangeVaultPassword, onRemoveVaultPassword, onLockVault, keepInMemory = false, onKeepInMemoryChange, accent = 'red', onAccentChange, theme = 'system', onThemeChange } = $props();
+  let { onClose, vaultHasPassword = false, onSetVaultPassword, onChangeVaultPassword, onRemoveVaultPassword, onLockVault, keepInMemory = false, onKeepInMemoryChange, accent = 'red', onAccentChange, theme = 'system', onThemeChange, dateFormat = 'DD-MM-YYYY', onDateFormatChange } = $props();
 
   let activeSection = $state('llm');
 
@@ -154,6 +154,21 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
               onclick={() => onAccentChange('green')}
             ></button>
           </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-label">
+            <span class="setting-name">Date format</span>
+            <span class="setting-desc">
+              Controls how dates are displayed in the calendar. Notes are always stored with
+              ISO 8601 titles (YYYY-MM-DD) — changing this only affects display.
+            </span>
+          </div>
+          <select value={dateFormat} onchange={(e) => onDateFormatChange(e.currentTarget.value)}>
+            <option value="DD-MM-YYYY">DD-MM-YYYY</option>
+            <option value="YYYY-MM-DD">YYYY-MM-DD</option>
+            <option value="MM-DD-YYYY">MM-DD-YYYY</option>
+          </select>
         </div>
 
       {:else if activeSection === 'security'}

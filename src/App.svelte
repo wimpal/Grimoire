@@ -19,6 +19,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   import { invoke } from '@tauri-apps/api/core';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { onMount } from 'svelte';
+  import Calendar from './lib/Calendar.svelte';
   import Chat from './lib/Chat.svelte';
   import Graph from './lib/Graph.svelte';
   import LockScreen from './lib/LockScreen.svelte';
@@ -71,6 +72,9 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   // Graph overlay
   let graphOpen = $state(false);
 
+  // Calendar overlay
+  let calendarOpen = $state(false);
+
   // Search panel
   let searchOpen = $state(false);
 
@@ -101,9 +105,14 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   let keepModelInMemory = $state(localStorage.getItem('keepModelInMemory') === 'true');
   let accent = $state(localStorage.getItem('accent') ?? 'red');
   let theme  = $state(localStorage.getItem('theme')  ?? 'system');
+  let dailyNoteFormat = $state(localStorage.getItem('dailyNoteFormat') ?? 'DD-MM-YYYY');
 
   $effect(() => {
     localStorage.setItem('keepModelInMemory', String(keepModelInMemory));
+  });
+
+  $effect(() => {
+    localStorage.setItem('dailyNoteFormat', dailyNoteFormat);
   });
 
   $effect(() => {
@@ -1106,6 +1115,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           <button class="graph-toggle" onclick={() => (graphOpen = !graphOpen)}>
             {graphOpen ? '✕ Graph' : 'Graph'}
           </button>
+          <button class="graph-toggle" onclick={() => (calendarOpen = !calendarOpen)}>Calendar</button>
           <span class="word-count">{wordCount} word{wordCount === 1 ? '' : 's'} · {readingTime} min</span>
         </div>
       </div>
@@ -1166,10 +1176,10 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           <button class="graph-toggle" onclick={() => (graphOpen = !graphOpen)}>
             {graphOpen ? '✕ Graph' : 'Graph'}
           </button>
+          <button class="graph-toggle" onclick={() => (calendarOpen = !calendarOpen)}>Calendar</button>
         </div>
       </div>
-      {#if tableViewOpen && selectedFolderId && selectedFolderId !== 'all'}
-        {#key dbKey}
+      {#if tableViewOpen && selectedFolderId && selectedFolderId !== 'all'}        {#key dbKey}
         <DatabaseView
           folderId={selectedFolderId}
           onOpenNote={(id) => openNoteById(id)}
@@ -1201,6 +1211,17 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   </div>
 {/if}
 
+{#if calendarOpen}
+  <Calendar
+    open={calendarOpen}
+    onClose={() => (calendarOpen = false)}
+    onSelectNote={(note) => { openNote(note); calendarOpen = false; }}
+    onRefresh={() => { loadFolders(); loadNotes(); }}
+    onSelectFolder={(id) => selectFolder(id)}
+    dateFormat={dailyNoteFormat}
+  />
+{/if}
+
 {#if settingsOpen}
   <Settings
     onClose={() => (settingsOpen = false)}
@@ -1215,6 +1236,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     onAccentChange={(v) => (accent = v)}
     {theme}
     onThemeChange={(v) => (theme = v)}
+    dateFormat={dailyNoteFormat}
+    onDateFormatChange={(v) => (dailyNoteFormat = v)}
   />
 {/if}
 

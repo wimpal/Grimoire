@@ -18,6 +18,7 @@
 use serde::Serialize;
 use crate::KeyStore;
 
+pub mod calendar;
 pub mod chat;
 pub mod notes;
 pub mod rag;
@@ -27,6 +28,7 @@ pub mod properties;
 pub mod templates;
 
 // Re-export all public command functions so lib.rs can keep using commands::create_note etc.
+pub use calendar::*;
 pub use chat::*;
 pub use notes::*;
 pub use rag::*;
