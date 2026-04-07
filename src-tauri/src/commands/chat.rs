@@ -16,6 +16,7 @@
 // along with Grimoire. If not, see <https://www.gnu.org/licenses/>.
 
 use serde::{Deserialize, Serialize};
+use futures::StreamExt;
 
 // ---------------------------------------------------------------------------
 // Chat (Ollama)
@@ -58,29 +59,34 @@ impl OllamaOptions {
     }
 }
 
-/// The response body from Ollama. Only the `message` field is needed.
+/// One line in Ollama's NDJSON streaming response.
+/// `done` is true on the final (empty) message that signals end of stream.
 #[derive(Deserialize)]
-struct OllamaChatResponse {
+struct OllamaStreamChunk {
     message: ChatMessage,
+    done: bool,
 }
 
-/// Send a chat message to a locally-running Ollama instance and return the
-/// assistant's reply. The full `messages` history is forwarded each time so
-/// Ollama maintains conversational context.
+/// Send a chat message to a locally-running Ollama instance.
+/// Tokens are emitted incrementally via the `chat:token` Tauri event as they
+/// arrive from Ollama. The command resolves once the stream is complete.
 /// `keep_in_memory`: when true, keep_alive is set to -1 so the model is
 /// never unloaded; when false the Ollama default (300s) is used.
 #[tauri::command]
 pub async fn chat(
+    app: tauri::AppHandle,
     model: String,
     messages: Vec<ChatMessage>,
     keep_in_memory: bool,
-) -> Result<String, String> {
+) -> Result<(), String> {
+    use tauri::Emitter;
+
     let client = reqwest::Client::new();
 
     let body = OllamaChatRequest {
         model,
         messages,
-        stream: false,
+        stream: true,
         keep_alive: if keep_in_memory { -1 } else { 300 },
         options: OllamaOptions::balanced(),
     };
@@ -92,13 +98,43 @@ pub async fn chat(
         .await
         .map_err(|e| format!("Could not reach Ollama — is it running? ({e})"))?;
 
-    let text = response
-        .text()
-        .await
-        .map_err(|e| format!("Could not read Ollama response: {e}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("Ollama returned {status}: {body}"));
+    }
 
-    let parsed: OllamaChatResponse = serde_json::from_str(&text)
-        .map_err(|e| format!("Unexpected response from Ollama: {e}\nResponse: {text}"))?;
+    // Ollama streams NDJSON: one JSON object per line, terminated by a final
+    // object with `"done": true`. We buffer bytes into lines and parse each one.
+    let mut stream = response.bytes_stream();
+    let mut line_buf = String::new();
 
-    Ok(parsed.message.content)
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.map_err(|e| format!("Stream read error: {e}"))?;
+        let text = std::str::from_utf8(&bytes).map_err(|e| format!("UTF-8 error: {e}"))?;
+
+        for ch in text.chars() {
+            if ch == '\n' {
+                let line = line_buf.trim().to_string();
+                line_buf.clear();
+                if line.is_empty() { continue; }
+
+                let parsed: OllamaStreamChunk = serde_json::from_str(&line)
+                    .map_err(|e| format!("Unexpected Ollama chunk: {e}\nLine: {line}"))?;
+
+                if !parsed.done && !parsed.message.content.is_empty() {
+                    app.emit("chat:token", &parsed.message.content)
+                        .map_err(|e| format!("Event emit error: {e}"))?;
+                }
+
+                if parsed.done {
+                    return Ok(());
+                }
+            } else {
+                line_buf.push(ch);
+            }
+        }
+    }
+
+    Ok(())
 }

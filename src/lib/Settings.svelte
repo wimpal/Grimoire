@@ -16,23 +16,46 @@ You should have received a copy of the GNU General Public License
 along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
 <script>
-  let { onClose, vaultHasPassword = false, onSetVaultPassword, onChangeVaultPassword, onRemoveVaultPassword, onLockVault, keepInMemory = false, onKeepInMemoryChange, accent = 'red', onAccentChange, theme = 'system', onThemeChange, dateFormat = 'DD-MM-YYYY', onDateFormatChange } = $props();
+  import { invoke } from '@tauri-apps/api/core';
+  import { open as openDialog } from '@tauri-apps/plugin-dialog';
+
+  let { onClose, vaultHasPassword = false, onSetVaultPassword, onChangeVaultPassword, onRemoveVaultPassword, onLockVault, keepInMemory = false, onKeepInMemoryChange, accent = 'red', onAccentChange, theme = 'system', onThemeChange, dateFormat = 'DD-MM-YYYY', onDateFormatChange, devNativeContextMenu = false, onDevNativeContextMenuChange } = $props();
+
+  const isDev = import.meta.env.DEV;
 
   let activeSection = $state('llm');
 
-  const sections = [
+  const sections = $derived([
     { id: 'llm',        label: 'LLM' },
     { id: 'appearance', label: 'Appearance' },
     { id: 'security',   label: 'Security' },
     { id: 'privacy',    label: 'Privacy' },
+    { id: 'data',       label: 'Data' },
     { id: 'keybinds',   label: 'Keybinds' },
-  ];
+    ...(isDev ? [{ id: 'developer', label: 'Developer' }] : []),
+  ]);
 
   // ── Placeholder state (no backend yet) ────────────────────────────────────
 
   let chatModel      = $state('llama3.2');
   let embeddingModel = $state('nomic-embed-text');
   let logFileAccess  = $state(true);
+
+  // ── Export state ──────────────────────────────────────────────────────────
+
+  let exportStatus = $state(''); // '' | 'running' | 'done:N' | 'error:msg'
+
+  async function runExport() {
+    exportStatus = 'running';
+    try {
+      const dir = await openDialog({ directory: true, multiple: false, title: 'Export notes to…' });
+      if (!dir) { exportStatus = ''; return; }
+      const count = await invoke('export_notes', { destDir: dir });
+      exportStatus = `done:${count}`;
+    } catch (e) {
+      exportStatus = `error:${e}`;
+    }
+  }
 </script>
 
 <div class="settings-overlay">
@@ -194,6 +217,29 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           </div>
         </div>
 
+      {:else if activeSection === 'data'}
+        <h3>Data</h3>
+
+        <div class="setting-row">
+          <div class="setting-label">
+            <span class="setting-name">Export notes to Markdown</span>
+            <span class="setting-desc">
+              Saves all unlocked notes as <code>.md</code> files in a folder you choose.
+              Folder structure is preserved as subdirectories. Locked notes are skipped.
+            </span>
+          </div>
+          <div class="setting-actions">
+            <button class="settings-action-btn" onclick={runExport} disabled={exportStatus === 'running'}>
+              {exportStatus === 'running' ? 'Exporting…' : 'Export'}
+            </button>
+            {#if exportStatus.startsWith('done:')}
+              <span class="export-ok">✓ {exportStatus.slice(5)} notes exported</span>
+            {:else if exportStatus.startsWith('error:')}
+              <span class="export-err">{exportStatus.slice(6)}</span>
+            {/if}
+          </div>
+        </div>
+
       {:else if activeSection === 'privacy'}
         <h3>Privacy</h3>
 
@@ -246,6 +292,18 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
               <td><kbd>Ctrl+Shift+Enter</kbd></td>
             </tr>
             <tr>
+              <td>Cycle tab forward</td>
+              <td><kbd>Ctrl+Tab</kbd></td>
+            </tr>
+            <tr>
+              <td>Cycle tab backward</td>
+              <td><kbd>Ctrl+Shift+Tab</kbd></td>
+            </tr>
+            <tr>
+              <td>Open note in new tab (click)</td>
+              <td><kbd>Ctrl+Click</kbd></td>
+            </tr>
+            <tr>
               <td>Toggle chat panel</td>
               <td>—</td>
             </tr>
@@ -255,6 +313,29 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
             </tr>
           </tbody>
         </table>
+
+      {:else if activeSection === 'developer'}
+        <h3>Developer</h3>
+        <p class="settings-notice">These settings are only visible in dev builds.</p>
+
+        <div class="setting-row">
+          <div class="setting-label">
+            <span class="setting-name">Use native context menu</span>
+            <span class="setting-desc">
+              Disables the custom context menu and restores the native WebView2 menu,
+              which includes Inspect Element. Useful for debugging layout and styles.
+            </span>
+          </div>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              checked={devNativeContextMenu}
+              onchange={(e) => onDevNativeContextMenuChange(e.currentTarget.checked)}
+            />
+            <span class="toggle-label">{devNativeContextMenu ? 'On' : 'Off'}</span>
+          </label>
+        </div>
+
       {/if}
 
     </div>
@@ -558,6 +639,23 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     color: var(--danger);
     border-color: var(--danger);
     background: rgba(192, 57, 43, 0.08);
+  }
+
+  .setting-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+
+  .export-ok {
+    font-size: 12px;
+    color: var(--text-m);
+  }
+
+  .export-err {
+    font-size: 12px;
+    color: var(--danger);
   }
 
   kbd {

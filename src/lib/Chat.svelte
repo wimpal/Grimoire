@@ -17,6 +17,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
 <script>
   import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
   import { untrack, tick } from 'svelte';
 
   // ── Props ──────────────────────────────────────────────────────────────────
@@ -159,10 +160,31 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         payload = [systemMsg, ...updated];
       }
 
-      // Pass the full conversation history so Ollama keeps context.
-      const reply = await invoke('chat', { model, messages: payload, keepInMemory });
-      messages = [...messages, { role: 'assistant', content: reply }];
+      // Push a placeholder assistant message that will be filled in token by token.
+      messages = [...messages, { role: 'assistant', content: '' }];
+
+      // Listen for streaming tokens from the backend. Each event appends to the
+      // last message (the placeholder we just pushed).
+      const unlisten = await listen('chat:token', (event) => {
+        messages = messages.map((m, i) =>
+          i === messages.length - 1
+            ? { ...m, content: m.content + event.payload }
+            : m
+        );
+      });
+
+      try {
+        // invoke resolves when the stream ends. Return type is now void.
+        await invoke('chat', { model, messages: payload, keepInMemory });
+      } finally {
+        unlisten();
+      }
     } catch (e) {
+      // Remove the empty placeholder if the request failed before any tokens arrived.
+      if (messages.length > 0 && messages[messages.length - 1].role === 'assistant'
+          && messages[messages.length - 1].content === '') {
+        messages = messages.slice(0, -1);
+      }
       error = String(e);
     } finally {
       isLoading = false;
@@ -216,14 +238,16 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   <div class="chat-messages" bind:this={messagesEl}>
     {#each messages as msg, i (i)}
-      <div class="chat-message {msg.role}">
-        <p>{msg.content}</p>
-      </div>
+      {#if msg.role !== 'assistant' || msg.content !== ''}
+        <div class="chat-message {msg.role}">
+          <p>{msg.content}</p>
+        </div>
+      {/if}
     {:else}
-      <p class="chat-empty">Ask anything. Runs locally via Ollama.</p>
+      <p class="chat-empty">Consult the grimoire.</p>
     {/each}
 
-    {#if isLoading}
+    {#if isLoading && (messages.length === 0 || messages[messages.length - 1]?.role !== 'assistant' || messages[messages.length - 1]?.content === '')}
       <div class="chat-message assistant loading">
         <p>Thinking…</p>
       </div>

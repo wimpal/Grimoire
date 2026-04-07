@@ -2,11 +2,15 @@
 This file is part of Grimoire — licensed under GPL-3.0 or later. -->
 
 <script>
-  const { tabs, activeTabId, onActivate, onClose, onRename, onNew } = $props();
+  const { tabs, activeTabId, onActivate, onClose, onRename, onNew, renameRequestId = null } = $props();
 
   // Local state for the inline rename input.
   let editingTabId = $state(null);
   let renameValue  = $state('');
+
+  $effect(() => {
+    if (renameRequestId != null) startRename(renameRequestId);
+  });
 
   function startRename(id) {
     const tab = tabs.find(t => t.id === id);
@@ -40,6 +44,7 @@ This file is part of Grimoire — licensed under GPL-3.0 or later. -->
       role="tab"
       aria-selected={tab.id === activeTabId}
       tabindex="-1"
+      data-tab-id={tab.id}
       onmousedown={(e) => { if (e.button === 1) { e.preventDefault(); onClose(tab.id); } }}
     >
       <button

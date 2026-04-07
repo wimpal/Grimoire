@@ -236,6 +236,77 @@ pub async fn delete_note(pool: State<'_, SqlitePool>, id: i64) -> Result<(), Str
     Ok(())
 }
 
+/// Duplicate a note — creates a copy with " (copy)" appended to the title in
+/// the same folder. Returns the new note row.
+#[tauri::command]
+pub async fn duplicate_note(
+    pool: State<'_, SqlitePool>,
+    keys: State<'_, KeyStore>,
+    id: i64,
+) -> Result<Note, String> {
+    // Fetch the raw row first so we can decrypt it.
+    let src_row = sqlx::query_as::<_, NoteRow>(
+        "SELECT id, title, content, folder_id, created_at, updated_at FROM notes WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let folder_id = src_row.folder_id;
+
+    // Check if the folder is locked — refuse if so.
+    let folder_locked = if let Some(fid) = folder_id {
+        let v: i64 = sqlx::query_scalar("SELECT locked FROM folders WHERE id = ?")
+            .bind(fid)
+            .fetch_optional(pool.inner())
+            .await
+            .map_err(|e| e.to_string())?
+            .unwrap_or(0);
+        v != 0
+    } else {
+        false
+    };
+
+    if folder_id.map(|fid| folder_is_locked(fid, folder_locked, &keys)).unwrap_or(false) {
+        return Err("note_locked".to_string());
+    }
+
+    // Decrypt source title and content.
+    let source = map_note_row(src_row, folder_locked, &keys);
+
+    let new_title = format!("{} (copy)", source.title);
+    let new_content = source.content;
+
+    // Re-encrypt for the destination folder.
+    let (stored_title, stored_content) = if let Some(key) = resolve_key(folder_id, &keys) {
+        (
+            crate::crypto::encrypt(&key, new_title.as_bytes()),
+            crate::crypto::encrypt(&key, new_content.as_bytes()),
+        )
+    } else {
+        (new_title.clone(), new_content.clone())
+    };
+
+    let row = sqlx::query_as::<_, NoteRow>(
+        "INSERT INTO notes (title, content, folder_id)
+         VALUES (?, ?, ?)
+         RETURNING id, title, content, folder_id, created_at, updated_at",
+    )
+    .bind(&stored_title)
+    .bind(&stored_content)
+    .bind(folder_id)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let note = map_note_row(row, false, &keys);
+    if !note.locked {
+        super::search::fts_upsert(pool.inner(), note.id, &note.title, &note.content).await;
+    }
+    Ok(note)
+}
+
 // ---------------------------------------------------------------------------
 // Folder commands
 // ---------------------------------------------------------------------------
@@ -321,4 +392,138 @@ pub async fn delete_folder(pool: State<'_, SqlitePool>, id: i64) -> Result<(), S
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Export
+// ---------------------------------------------------------------------------
+
+/// Export all unlocked notes as plain Markdown files under `dest_dir`.
+/// The folder hierarchy is recreated as subdirectories; unfiled notes go to
+/// the root. Locked notes are silently skipped — we never decrypt without the
+/// user's key, and the key is not available at export time for locked folders.
+#[tauri::command]
+pub async fn export_notes(
+    pool: State<'_, SqlitePool>,
+    keys: State<'_, KeyStore>,
+    dest_dir: String,
+) -> Result<u32, String> {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    // Load all folders so we can resolve folder_id → path segment.
+    let folder_rows = sqlx::query_as::<_, FolderRow>(
+        "SELECT id, name, parent_id, created_at, locked FROM folders",
+    )
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Build a map from folder ID to its display name (decrypted).
+    let folder_names: HashMap<i64, String> = folder_rows
+        .into_iter()
+        .map(|row| {
+            let mapped = map_folder_row(row, &keys);
+            (mapped.id, if mapped.locked { String::new() } else { mapped.name })
+        })
+        .collect();
+
+    // Load all notes.
+    let note_rows = sqlx::query_as::<_, NoteRow>(
+        "SELECT id, title, content, folder_id, created_at, updated_at FROM notes ORDER BY id ASC",
+    )
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let dest = PathBuf::from(&dest_dir);
+
+    // Wrap everything in a timestamped subfolder so repeated exports don't collide.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    // Format as YYYY-MM-DD using seconds since epoch.
+    let days  = secs / 86400;
+    let y = (days / 365 + 1970) as u32;
+    // Rough but good enough for a folder name; no external crate needed.
+    let month_day = days % 365;
+    let m = (month_day / 30 + 1).min(12) as u32;
+    let d = (month_day % 30 + 1).min(31) as u32;
+    let date_str = format!("{d:02}-{m:02}-{y:04}");
+    let export_root = dest.join(format!("Grimoire - export {date_str}"));
+    let dest = export_root;
+    let mut exported: u32 = 0;
+
+    for row in note_rows {
+        // Determine whether the note is locked.
+        let is_locked = if let Some(fid) = row.folder_id {
+            let locked_col: i64 = sqlx::query_scalar("SELECT locked FROM folders WHERE id = ?")
+                .bind(fid)
+                .fetch_optional(pool.inner())
+                .await
+                .map_err(|e| e.to_string())?
+                .unwrap_or(0);
+            super::folder_is_locked(fid, locked_col != 0, &keys)
+        } else {
+            false
+        };
+
+        if is_locked {
+            continue; // skip — no key available
+        }
+
+        let note = map_note_row(row, false, &keys);
+
+        // Resolve the output directory for this note.
+        let out_dir = if let Some(fid) = note.folder_id {
+            let folder_name = folder_names
+                .get(&fid)
+                .cloned()
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| format!("folder_{fid}"));
+            // Sanitise the folder name for use as a directory name.
+            let safe = sanitise_path_component(&folder_name);
+            dest.join(safe)
+        } else {
+            dest.clone()
+        };
+
+        std::fs::create_dir_all(&out_dir)
+            .map_err(|e| format!("Could not create directory {}: {e}", out_dir.display()))?;
+
+        // Build the output file path, sanitising the title.
+        let safe_title = sanitise_path_component(&note.title);
+        let file_name = if safe_title.is_empty() {
+            format!("note_{}", note.id)
+        } else {
+            safe_title
+        };
+        let mut file_path = out_dir.join(&file_name).with_extension("md");
+
+        // Avoid overwriting an existing file from a different note with the same title.
+        if file_path.exists() {
+            file_path = out_dir.join(format!("{}_{}", file_name, note.id)).with_extension("md");
+        }
+
+        std::fs::write(&file_path, &note.content)
+            .map_err(|e| format!("Could not write {}: {e}", file_path.display()))?;
+
+        exported += 1;
+    }
+
+    Ok(exported)
+}
+
+/// Strip characters that are illegal in directory or file names on Windows,
+/// macOS, and Linux. Collapses repeating spaces/dashes and trims whitespace.
+fn sanitise_path_component(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '-',
+            c => c,
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
 }

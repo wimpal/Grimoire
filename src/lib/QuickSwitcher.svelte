@@ -21,10 +21,11 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   /**
    * @type {{
    *   onSelect: (note: object) => void,
+   *   onSelectNewTab: (note: object) => void,
    *   onClose: () => void,
    * }}
    */
-  let { onSelect, onClose } = $props();
+  let { onSelect, onSelectNewTab, onClose } = $props();
 
   let query = $state('');
   let allNotes = $state([]);
@@ -69,7 +70,11 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     } else if (e.key === 'Enter') {
       e.preventDefault();
       if (filtered[selectedIndex]) {
-        onSelect(filtered[selectedIndex]);
+        if ((e.ctrlKey || e.metaKey) && onSelectNewTab) {
+          onSelectNewTab(filtered[selectedIndex]);
+        } else {
+          onSelect(filtered[selectedIndex]);
+        }
         onClose();
       }
     }
@@ -77,6 +82,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- svelte-ignore a11y_click_events_have_key_events -->
 <div class="qs-backdrop" onclick={onClose} role="dialog" aria-modal="true" aria-label="Quick Switcher" tabindex="-1">
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div class="qs-panel" onclick={(e) => e.stopPropagation()}>
@@ -102,7 +108,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         >
           <button
             class="qs-item-btn"
-            onclick={() => { onSelect(note); onClose(); }}
+            onclick={(e) => { (e.ctrlKey || e.metaKey) && onSelectNewTab ? onSelectNewTab(note) : onSelect(note); onClose(); }}
             onmouseenter={() => { selectedIndex = i; }}
           >{note.title}</button>
         </li>

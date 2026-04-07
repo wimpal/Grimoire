@@ -33,6 +33,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   import Search from './lib/Search.svelte';
   import ConfirmModal from './lib/ConfirmModal.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
+  import ContextMenu from './lib/ContextMenu.svelte';
 
   const appWindow = getCurrentWindow();
 
@@ -151,6 +152,207 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   // Drag-and-drop
   let dragOverFolderId = $state(null); // folder ID currently being hovered during a note drag
   let isDragging = $state(false);      // true while a note drag is in progress
+
+  // Svelte's <svelte:window ondragover> is unreliable in Tauri/WebView2 — use raw DOM API instead.
+  // Without this, the browser shows a "not allowed" cursor everywhere outside explicit drop targets.
+  $effect(() => {
+    const allow = (e) => e.preventDefault();
+    document.addEventListener('dragover', allow);
+    return () => document.removeEventListener('dragover', allow);
+  });
+
+  // ── Context menu ───────────────────────────────────────────────────────────
+
+  let ctxMenu = $state(null); // { x, y, items } — null when closed
+
+  // In dev builds, a toggle in Settings lets you revert to the native WebView2
+  // context menu (useful for Inspect Element).
+  let devNativeContextMenu = $state(
+    import.meta.env.DEV ? (localStorage.getItem('devNativeContextMenu') === 'true') : false
+  );
+
+  $effect(() => {
+    if (import.meta.env.DEV) {
+      localStorage.setItem('devNativeContextMenu', String(devNativeContextMenu));
+    }
+
+    // If the user switched to native, make sure any open custom menu is closed.
+    if (devNativeContextMenu) ctxMenu = null;
+
+    const handler = (e) => {
+      if (devNativeContextMenu) return; // let native menu show
+      e.preventDefault();
+      const items = buildCtxItems(e);
+      if (items.length === 0) return;
+      const x = Math.min(e.clientX, window.innerWidth  - 174);
+      const y = Math.min(e.clientY, window.innerHeight - items.length * 28 - 16);
+      ctxMenu = { x, y, items };
+    };
+
+    document.addEventListener('contextmenu', handler);
+    return () => document.removeEventListener('contextmenu', handler);
+  });
+
+  function buildCtxItems(e) {
+    const tabEl      = e.target.closest('[data-tab-id]');
+    const noteLiEl   = e.target.closest('[data-note-id]');
+    const folderLiEl = e.target.closest('[data-folder-id]');
+    const isEditor   = !!e.target.closest('.content-area');
+
+    let items = /** @type {any[]} */ ([]);
+
+    if (tabEl) {
+      const tabId = tabEl.dataset.tabId;
+      items = [
+        { label: 'Close',        action: () => closeTab(tabId) },
+        { label: 'Close Others', action: () => closeOtherTabs(tabId) },
+        { label: 'Rename',       action: () => startTabRenameExternal(tabId) },
+      ];
+    } else if (noteLiEl && !noteLiEl.classList.contains('locked-row')) {
+      const noteId = Number(noteLiEl.dataset.noteId);
+      const note = notes.find(n => n.id === noteId);
+      items = [
+        { label: 'Open in New Tab', action: () => note && openNoteInNewTab(note) },
+        { label: 'Duplicate',       action: async () => {
+            await invoke('duplicate_note', { id: noteId });
+            await loadNotes();
+          }
+        },
+        { divider: true },
+        { label: 'Delete', action: () => deleteNote(noteId), danger: true },
+      ];
+    } else if (folderLiEl) {
+      const raw = folderLiEl.dataset.folderId;
+      if (raw && raw !== 'all' && raw !== 'unfiled') {
+        const folderId = Number(raw);
+        const folder = folders.find(f => f.id === folderId);
+        if (folder && !folder.locked) {
+          items = [
+            unlockedFolderIds.has(folderId)
+              ? { label: 'Remove password', action: () => (folderPwModal = { mode: 'remove', folderId }) }
+              : { label: 'Set password',    action: () => (folderPwModal = { mode: 'set',    folderId }) },
+            { label: 'Delete', action: () => deleteFolder(folderId), danger: true },
+          ];
+        }
+      }
+    } else if (isEditor) {
+      // Capture selection NOW, at contextmenu time, before the textarea loses focus.
+      const el = editorTextareaEl;
+      const start = el?.selectionStart ?? 0;
+      const end   = el?.selectionEnd   ?? 0;
+      const val   = el?.value ?? '';
+      const selText = val.slice(start, end);
+      const hasSel  = selText.length > 0;
+
+      /** @type {any[]} */
+      const formatSubmenu = hasSel ? [
+        { label: 'Bold',          action: () => applyInlineFormat(start, end, val, '**', '**') },
+        { label: 'Italic',        action: () => applyInlineFormat(start, end, val, '*',  '*')  },
+        { label: 'Strikethrough', action: () => applyInlineFormat(start, end, val, '~~', '~~') },
+        { label: 'Inline Code',   action: () => applyInlineFormat(start, end, val, '`',  '`')  },
+        { divider: true },
+        { label: 'Heading 1',     action: () => applyLinePrefix(start, end, val, '# ')   },
+        { label: 'Heading 2',     action: () => applyLinePrefix(start, end, val, '## ')  },
+        { label: 'Heading 3',     action: () => applyLinePrefix(start, end, val, '### ') },
+        { divider: true },
+        { label: 'Code Block',    action: () => applyInlineFormat(start, end, val, '```\n', '\n```') },
+      ] : [];
+
+      items = [
+        ...(hasSel ? [{ label: 'Format', submenu: formatSubmenu }, { divider: true }] : []),
+        {
+          label: 'Cut',
+          disabled: !hasSel,
+          action: () => {
+            navigator.clipboard.writeText(selText);
+            editorContent = val.slice(0, start) + val.slice(end);
+            markDirty();
+          },
+        },
+        {
+          label: 'Copy',
+          disabled: !hasSel,
+          action: () => navigator.clipboard.writeText(selText),
+        },
+        {
+          label: 'Paste',
+          action: async () => {
+            const text = await navigator.clipboard.readText();
+            editorContent = val.slice(0, start) + text + val.slice(end);
+            markDirty();
+          },
+        },
+        ...(hasSel ? [{ divider: true }, { label: 'Send to Chat', action: () => sendSelectionToChat() }] : []),
+      ];
+    }
+
+    return items;
+  }
+
+  // Wraps the captured selection with a prefix and suffix (e.g. "**" for bold).
+  // Trailing whitespace is trimmed from the selection before wrapping — double-clicking
+  // a word in browsers selects the trailing space, which would break markdown syntax.
+  function applyInlineFormat(start, end, val, prefix, suffix) {
+    const sel     = val.slice(start, end);
+    const trimmed = sel.trimEnd();
+    editorContent = val.slice(0, start) + prefix + trimmed + suffix + val.slice(end);
+    markDirty();
+  }
+
+  // Prepends a Markdown heading prefix to the selected text, ensuring it sits
+  // on its own line. If the selection is mid-line, newlines are inserted around
+  // it so only the selected content becomes the heading — not the rest of the line.
+  // Strips any existing heading prefix first so toggling works correctly.
+  function applyLinePrefix(start, end, val, prefix) {
+    const sel        = val.slice(start, end).trimEnd();
+    const needBefore = start > 0 && val[start - 1] !== '\n';
+    const needAfter  = (start + sel.length) < val.length && val[start + sel.length] !== '\n';
+    const prefixed   = sel.split('\n').map(line => prefix + line.replace(/^#{1,6}\s*/, '')).join('\n');
+    editorContent    = val.slice(0, start)
+      + (needBefore ? '\n' : '')
+      + prefixed
+      + (needAfter ? '\n' : '')
+      + val.slice(end);
+    markDirty();
+  }
+
+  async function closeOtherTabs(keepId) {
+    if (isDirty) await saveNote();
+    tabs = tabs.filter(t => t.id === keepId);
+    if (activeTabId !== keepId) {
+      activeTabId = keepId;
+      const tab = tabs[0];
+      if (tab?.type === 'note' && tab.noteId != null) {
+        try {
+          const note = await invoke('get_note', { id: tab.noteId });
+          openNote(note);
+        } catch { activeNote = null; editorContent = ''; editorTitle = ''; }
+      } else {
+        activeNote = null; editorContent = ''; editorTitle = ''; isDirty = false;
+      }
+    }
+  }
+
+  // Triggers inline rename in TabBar for a tab by id.
+  // We signal TabBar via a reactive prop; it watches with $effect and calls startRename().
+  let externalRenameTabId = $state(null);
+  function startTabRenameExternal(id) {
+    externalRenameTabId = id;
+    // Reset after a tick so the same tab can be renamed twice consecutively.
+    setTimeout(() => { externalRenameTabId = null; }, 50);
+  }
+
+  function sendSelectionToChat() {
+    let text = '';
+    if (editorTextareaEl) {
+      const { selectionStart, selectionEnd, value } = editorTextareaEl;
+      text = value.slice(selectionStart, selectionEnd).trim();
+    }
+    if (!text && activeNote) text = activeNote.title;
+    if (!text) return;
+    chatOpen = true;
+    chatInsert = { text, seq: (chatInsert?.seq ?? 0) + 1 };
+  }
 
   // Quick Switcher
   let quickSwitcherOpen = $state(false);
@@ -438,6 +640,15 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         : t
       );
     }
+    openNote(note);
+  }
+
+  // Opens a note in a brand-new tab without touching the current tab.
+  function openNoteInNewTab(note) {
+    if (isDirty) saveNote();
+    const id = makeTabId();
+    tabs = [...tabs, { id, type: 'note', noteId: note.id, label: note.title, customLabel: null, readMode: false }];
+    activeTabId = id;
     openNote(note);
   }
 
@@ -770,6 +981,14 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       e.preventDefault();
       newTab();
     }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Tab' && tabs.length > 1) {
+      e.preventDefault();
+      const idx = tabs.findIndex(t => t.id === activeTabId);
+      const next = e.shiftKey
+        ? tabs[(idx - 1 + tabs.length) % tabs.length]
+        : tabs[(idx + 1) % tabs.length];
+      activateTab(next.id);
+    }
     if ((e.ctrlKey || e.metaKey) && e.key === 'w' && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       if (activeTabId) closeTab(activeTabId);
@@ -793,16 +1012,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     }
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'Enter') {
       e.preventDefault();
-      let text = '';
-      if (editorTextareaEl) {
-        const { selectionStart, selectionEnd, value } = editorTextareaEl;
-        text = value.slice(selectionStart, selectionEnd).trim();
-      }
-      // Fall back to note title if nothing is selected
-      if (!text && activeNote) text = activeNote.title;
-      if (!text) return;
-      chatOpen = true;
-      chatInsert = { text, seq: (chatInsert?.seq ?? 0) + 1 };
+      sendSelectionToChat();
     }
   }
 
@@ -1143,6 +1353,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     onClose={closeTab}
     onRename={renameTab}
     onNew={newTab}
+    renameRequestId={externalRenameTabId}
   />
 
   <div class="titlebar-right">
@@ -1183,10 +1394,18 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       </div>
 
       <ul class="folder-list">
-        <li class:active={selectedFolderId === 'all'}>
+        <li class:active={selectedFolderId === 'all'} data-folder-id="all">
           <button class="row-btn" onclick={() => selectFolder('all')}>All Notes</button>
         </li>
-        <li class:active={selectedFolderId === null}>
+        <li
+          class:active={selectedFolderId === null}
+          class:drag-over={dragOverFolderId === 'unfiled'}
+          class:drag-active={isDragging}
+          data-folder-id="unfiled"
+          ondragover={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; dragOverFolderId = 'unfiled'; }}
+          ondragleave={(e) => { if (dragOverFolderId === 'unfiled' && !e.currentTarget.contains(/** @type {Node} */ (e.relatedTarget))) dragOverFolderId = null; }}
+          ondrop={(e) => { e.preventDefault(); dragOverFolderId = null; const noteId = Number(e.dataTransfer.getData('text/plain')); if (noteId) moveNote(noteId, null); }}
+        >
           <button class="row-btn" onclick={() => selectFolder(null)}>Unfiled</button>
         </li>
         {#each folders as folder (folder.id)}
@@ -1195,6 +1414,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
             class:locked-row={folder.locked}
             class:drag-over={dragOverFolderId === folder.id}
             class:drag-active={isDragging && !folder.locked}
+            data-folder-id={folder.id}
             ondragover={(e) => !folder.locked && onFolderDragOver(e, folder.id)}
             ondragleave={(e) => { if (dragOverFolderId === folder.id && !e.currentTarget.contains(/** @type {Node} */ (e.relatedTarget))) dragOverFolderId = null; }}
             ondrop={(e) => !folder.locked && onFolderDrop(e, folder.id)}
@@ -1318,19 +1538,20 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           <li
             class:active={activeNote?.id === note.id}
             class:locked-row={note.locked}
+            data-note-id={note.id}
+            draggable={!note.locked}
+            ondragstart={(e) => !note.locked && onNoteDragStart(e, note)}
+            ondragend={onNoteDragEnd}
           >
             {#if note.locked}
               <span class="row-btn note-title note-locked"><span class="lock-icon">🔒</span>(locked)</span>
             {:else}
               <span
                 class="drag-handle"
-                draggable="true"
-                ondragstart={(e) => onNoteDragStart(e, note)}
-                ondragend={onNoteDragEnd}
                 title="Drag to move"
                 aria-hidden="true"
               >⠇</span>
-              <button class="row-btn note-title" onclick={() => navigateToNote(note)}>{note.title}</button>
+              <button class="row-btn note-title" onclick={(e) => e.ctrlKey ? openNoteInNewTab(note) : navigateToNote(note)}>{note.title}</button>
               <button class="icon-btn danger" onclick={() => deleteNote(note.id)} title="Delete note">✕</button>
             {/if}
           </li>
@@ -1527,6 +1748,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 {#if quickSwitcherOpen}
   <QuickSwitcher
     onSelect={(note) => navigateToNote(note)}
+    onSelectNewTab={(note) => openNoteInNewTab(note)}
     onClose={() => (quickSwitcherOpen = false)}
   />
 {/if}
@@ -1547,6 +1769,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     onThemeChange={(v) => (theme = v)}
     dateFormat={dailyNoteFormat}
     onDateFormatChange={(v) => (dailyNoteFormat = v)}
+    {devNativeContextMenu}
+    onDevNativeContextMenuChange={(v) => (devNativeContextMenu = v)}
   />
 {/if}
 
@@ -1557,5 +1781,14 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   {/if}
   <button class="gear-btn" onclick={() => (settingsOpen = true)} title="Settings">⚙</button>
 </div>
+
+{#if ctxMenu}
+  <ContextMenu
+    x={ctxMenu.x}
+    y={ctxMenu.y}
+    items={ctxMenu.items}
+    onClose={() => (ctxMenu = null)}
+  />
+{/if}
 
 {/if} <!-- end of vault-unlocked block -->
