@@ -223,6 +223,44 @@ pub async fn move_note(
     Ok(map_note_row(row, false, &keys))
 }
 
+/// Rename a note (title only). Returns the updated note.
+#[tauri::command]
+pub async fn rename_note(
+    pool: State<'_, SqlitePool>,
+    keys: State<'_, KeyStore>,
+    id: i64,
+    name: String,
+) -> Result<Note, String> {
+    // Fetch the current folder so we know whether to encrypt.
+    let current: Option<(Option<i64>,)> =
+        sqlx::query_as("SELECT folder_id FROM notes WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool.inner())
+            .await
+            .map_err(|e| e.to_string())?;
+
+    let folder_id = current.and_then(|(fid,)| fid);
+    let stored_title = if let Some(key) = resolve_key(folder_id, &keys) {
+        crate::crypto::encrypt(&key, name.as_bytes())
+    } else {
+        name
+    };
+
+    let row = sqlx::query_as::<_, NoteRow>(
+        "UPDATE notes SET title = ?, updated_at = unixepoch() WHERE id = ?
+         RETURNING id, title, content, folder_id, created_at, updated_at",
+    )
+    .bind(&stored_title)
+    .bind(id)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let note = map_note_row(row, false, &keys);
+    super::search::fts_upsert(pool.inner(), note.id, &note.title, &note.content).await;
+    Ok(note)
+}
+
 /// Delete a note. Returns nothing on success.
 #[tauri::command]
 pub async fn delete_note(pool: State<'_, SqlitePool>, id: i64) -> Result<(), String> {
@@ -386,6 +424,51 @@ pub async fn rename_folder(
 #[tauri::command]
 pub async fn delete_folder(pool: State<'_, SqlitePool>, id: i64) -> Result<(), String> {
     sqlx::query("DELETE FROM folders WHERE id = ?")
+        .bind(id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// Move a folder to a new parent (or to the root when new_parent_id is null).
+/// Rejects the move if it would create a cycle (i.e. new_parent_id is a descendant
+/// of the folder being moved, or equals the folder itself).
+#[tauri::command]
+pub async fn move_folder(
+    pool: State<'_, SqlitePool>,
+    id: i64,
+    new_parent_id: Option<i64>,
+) -> Result<(), String> {
+    // A folder cannot be moved into itself or into one of its own descendants.
+    if let Some(target) = new_parent_id {
+        if target == id {
+            return Err("A folder cannot be its own parent".to_string());
+        }
+        // Walk the ancestor chain of `target` upward; if we ever reach `id` then
+        // the proposed parent is a descendant — reject it.
+        let descendant_ids: Vec<(i64,)> = sqlx::query_as(
+            "WITH RECURSIVE subtree(id) AS (
+                 SELECT id FROM folders WHERE id = ?
+                 UNION ALL
+                 SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
+             )
+             SELECT id FROM subtree WHERE id != ?",
+        )
+        .bind(id)
+        .bind(id)
+        .fetch_all(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+        if descendant_ids.iter().any(|(did,)| *did == target) {
+            return Err("Cannot move a folder into one of its own descendants".to_string());
+        }
+    }
+
+    sqlx::query("UPDATE folders SET parent_id = ? WHERE id = ?")
+        .bind(new_parent_id)
         .bind(id)
         .execute(pool.inner())
         .await

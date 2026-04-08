@@ -39,6 +39,7 @@ pub struct KeyStore {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -83,12 +84,14 @@ pub fn run() {
         commands::list_notes,
         commands::update_note,
         commands::move_note,
+        commands::rename_note,
         commands::delete_note,
         commands::duplicate_note,
         commands::create_folder,
         commands::list_folders,
         commands::rename_folder,
         commands::delete_folder,
+        commands::move_folder,
         commands::chat,
         commands::index_note,
         commands::remove_note_index,
@@ -123,6 +126,7 @@ pub fn run() {
         commands::get_activity_heatmap,
         commands::get_notes_for_day,
         commands::get_or_create_daily_note,
+        commands::create_daily_note,
         commands::export_notes,
         auth::vault_has_password,
         auth::is_vault_locked,
@@ -143,12 +147,14 @@ pub fn run() {
         commands::list_notes,
         commands::update_note,
         commands::move_note,
+        commands::rename_note,
         commands::delete_note,
         commands::duplicate_note,
         commands::create_folder,
         commands::list_folders,
         commands::rename_folder,
         commands::delete_folder,
+        commands::move_folder,
         commands::chat,
         commands::index_note,
         commands::remove_note_index,
@@ -181,6 +187,7 @@ pub fn run() {
         commands::get_activity_heatmap,
         commands::get_notes_for_day,
         commands::get_or_create_daily_note,
+        commands::create_daily_note,
         commands::export_notes,
         auth::vault_has_password,
         auth::is_vault_locked,

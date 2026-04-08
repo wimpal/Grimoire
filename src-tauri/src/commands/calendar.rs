@@ -282,3 +282,120 @@ pub async fn get_or_create_daily_note(
     super::search::fts_upsert(pool.inner(), note.id, &note.title, &note.content).await;
     Ok(note)
 }
+
+/// Always create a new daily note for today. If a note with today's title already
+/// exists, append ` (2)`, ` (3)`, etc. until a free title is found.
+///
+/// Unlike `get_or_create_daily_note` (which opens the existing note), this command
+/// is bound to the activity bar button and never re-opens an existing note.
+#[tauri::command]
+pub async fn create_daily_note(
+    pool: State<'_, SqlitePool>,
+    keys: State<'_, KeyStore>,
+    date_format: Option<String>,
+) -> Result<Note, String> {
+    // Get today's date in ISO format from SQLite (UTC).
+    let (iso_date,): (String,) = sqlx::query_as("SELECT date('now')")
+        .fetch_one(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let vault_key = resolve_key(None, &keys);
+    let fmt = date_format.as_deref().unwrap_or("DD-MM-YYYY");
+    let base_title = format_display_date(&iso_date, fmt);
+
+    // ── Find or create the "Daily Notes" folder (same logic as above) ─────────
+
+    let folder_rows: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, name FROM folders WHERE parent_id IS NULL")
+            .fetch_all(pool.inner())
+            .await
+            .map_err(|e| e.to_string())?;
+
+    let daily_folder_id = folder_rows.iter().find(|(_, enc_name)| {
+        let name = if let Some(key) = vault_key {
+            crate::crypto::decrypt(&key, enc_name)
+                .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))
+                .unwrap_or_else(|_| enc_name.clone())
+        } else {
+            enc_name.clone()
+        };
+        name == "Daily Notes"
+    }).map(|(id, _)| *id);
+
+    let folder_id: i64 = if let Some(id) = daily_folder_id {
+        id
+    } else {
+        let stored_name = if let Some(key) = vault_key {
+            crate::crypto::encrypt(&key, b"Daily Notes")
+        } else {
+            "Daily Notes".to_string()
+        };
+        let (id,): (i64,) = sqlx::query_as(
+            "INSERT INTO folders (name, parent_id) VALUES (?, NULL) RETURNING id",
+        )
+        .bind(&stored_name)
+        .fetch_one(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+        id
+    };
+
+    // ── Collect existing titles in the folder ─────────────────────────────────
+
+    let note_rows: Vec<NoteRow> = sqlx::query_as(
+        "SELECT id, title, content, folder_id, created_at, updated_at
+         FROM notes WHERE folder_id = ?",
+    )
+    .bind(folder_id)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let existing_titles: Vec<String> = note_rows.iter().map(|row| {
+        if let Some(key) = vault_key {
+            crate::crypto::decrypt(&key, &row.title)
+                .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))
+                .unwrap_or_else(|_| row.title.clone())
+        } else {
+            row.title.clone()
+        }
+    }).collect();
+
+    // ── Find first available title ────────────────────────────────────────────
+
+    let final_title = if !existing_titles.contains(&base_title) {
+        base_title
+    } else {
+        let mut n = 2u32;
+        loop {
+            let candidate = format!("{} ({})", base_title, n);
+            if !existing_titles.contains(&candidate) {
+                break candidate;
+            }
+            n += 1;
+        }
+    };
+
+    // ── Insert the note ───────────────────────────────────────────────────────
+
+    let stored_title = if let Some(key) = vault_key {
+        crate::crypto::encrypt(&key, final_title.as_bytes())
+    } else {
+        final_title.clone()
+    };
+
+    let row = sqlx::query_as::<_, NoteRow>(
+        "INSERT INTO notes (title, folder_id) VALUES (?, ?)
+         RETURNING id, title, content, folder_id, created_at, updated_at",
+    )
+    .bind(&stored_title)
+    .bind(folder_id)
+    .fetch_one(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let note = map_note_row(row, false, &keys);
+    super::search::fts_upsert(pool.inner(), note.id, &note.title, &note.content).await;
+    Ok(note)
+}

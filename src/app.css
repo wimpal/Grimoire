@@ -68,11 +68,87 @@ h2 {
   margin: 0 0 8px;
 }
 
+/* ── Activity bar ────────────────────────────────────────────────── */
+
+.activity-bar {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 36px;
+  z-index: 20;
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 4px 0;
+  overflow: hidden;
+}
+
+.activity-bar-top {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}
+
+.activity-bar-bottom {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  margin-top: auto;
+}
+
+.activity-bar-btn {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  color: var(--text);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: color 0.1s, background 0.1s;
+}
+
+.activity-bar-btn:hover {
+  color: var(--text-h);
+  background: var(--bg3);
+}
+
+.activity-bar-btn.active {
+  color: var(--accent);
+}
+
+.activity-bar-separator {
+  width: 20px;
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 6px 0;
+  flex-shrink: 0;
+}
+
+.activity-bar-section-label {
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  color: var(--text);
+  opacity: 0.4;
+  user-select: none;
+  margin-bottom: 4px;
+}
+
 /* ── Three-panel layout ───────────────────────────────────────────── */
 
 .layout {
   display: grid;
   height: calc(100vh - 36px);
+  margin-left: 36px;
 }
 
 /* ── Custom title bar ─────────────────────────────────────────────── */
@@ -85,6 +161,7 @@ h2 {
   border-bottom: 1px solid var(--border);
   user-select: none;
   flex-shrink: 0;
+  margin-left: 36px;
 }
 
 /* The drag region fills the center — clicking and dragging here moves the window */
@@ -325,14 +402,29 @@ h2 {
   background: var(--bg3);
 }
 
+/* ── Panel dividers ───────────────────────────────────────────────── */
+
+.panel-divider {
+  padding: 0;
+  background: var(--bg2);
+  border: none;
+  border-left: 1px solid var(--border);
+  cursor: col-resize;
+  transition: border-color 0.1s;
+}
+
+.panel-divider:hover,
+.panel-divider.dragging {
+  border-left-color: var(--accent);
+}
+
 /* ── Sidebar (folders) ────────────────────────────────────────────── */
 
 .sidebar {
   background: var(--bg2);
-  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  padding: 16px 12px 44px;
+  padding: 16px 12px 12px;
   gap: 4px;
   overflow: hidden;
 }
@@ -351,37 +443,84 @@ h2 {
   gap: 2px;
 }
 
+/* Each <li> is a column: [row content] then [children ul] */
 .folder-list li {
+  position: relative;
+  border-radius: 5px;
+  font-size: 13px;
+  color: var(--text-h);
+}
+
+/* The horizontal row content: expand btn + name + icons + delete */
+.folder-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   padding: 5px 8px;
   border-radius: 5px;
   cursor: pointer;
-  color: var(--text-h);
-  font-size: 13px;
   gap: 4px;
 }
 
-.folder-list li:hover {
+.folder-list li > .folder-row:hover {
   background: var(--bg3);
 }
 
-.folder-list li.active {
+.folder-list li.active > .folder-row {
   background: var(--accent-bg);
   color: var(--accent);
 }
 
-.folder-list li.drag-over {
+.folder-list li.drag-over > .folder-row {
   background: var(--accent-bg);
   outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
 
-/* Disable pointer events on folder row children while a note drag is active.
-   This makes the <li> itself the unobstructed drop target. */
-.folder-list li.drag-active > * {
+/* Disable pointer events on folder row children while a drag is active. */
+.folder-list li.drag-active > .folder-row > * {
   pointer-events: none;
+}
+
+/* Tree connector lines on nested lists */
+.folder-children {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  margin-left: 16px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
+
+/* Expand/collapse toggle button */
+.folder-expand-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  width: 14px;
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text);
+  cursor: pointer;
+}
+
+/* Spacer that holds the same width for folders without children */
+.folder-expand-spacer {
+  width: 14px;
+  flex-shrink: 0;
+}
+
+/* Inline rename input — replaces the name button during first-creation editing */
+.inline-rename {
+  flex: 1;
+  background: var(--bg3);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font: inherit;
+  color: var(--text-h);
+  font-size: 13px;
+  min-width: 0;
 }
 
 /* Base style for buttons used as clickable rows */
@@ -411,7 +550,6 @@ h2 {
 
 .note-list {
   background: var(--bg2);
-  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   padding: 16px 12px;
@@ -472,6 +610,21 @@ h2 {
 
 .panel-header h2 {
   margin: 0;
+}
+
+.panel-header-actions {
+  flex: 1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+.panel-header-actions .icon-btn {
+  opacity: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 6px;
 }
 
 .collapse-btn {
@@ -600,7 +753,13 @@ h2 {
   color: var(--text);
 }
 
-li:hover .icon-btn {
+/* Note list items: icon-btn is a direct child of li */
+li:hover > .icon-btn {
+  opacity: 1;
+}
+/* Folder list items: only show on the innermost hovered li, not its ancestors.
+   :not(:has(li:hover)) prevents parent rows from lighting up when a child is hovered. */
+li:hover:not(:has(li:hover)) > .folder-row .icon-btn {
   opacity: 1;
 }
 
@@ -881,44 +1040,10 @@ li:hover .folder-count {
   display: block;
 }
 
-/* ── Gear / settings button ───────────────────────────────────────── */
-
-.bottom-left-btns {
-  position: fixed;
-  bottom: 12px;
-  left: 12px;
-  z-index: 40;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.gear-btn,
-.lock-quick-btn {
-  background: none;
-  border: none;
-  padding: 4px 6px;
-  border-radius: 5px;
-  font-size: 15px;
-  line-height: 1;
-  color: var(--text);
-  cursor: pointer;
-  opacity: 0.5;
-  transition: opacity 0.15s;
-}
-
-.gear-btn:hover,
-.lock-quick-btn:hover {
-  opacity: 1;
-  background: var(--bg3);
-  color: var(--text-h);
-}
-
 /* ── Chat panel ───────────────────────────────────────────────────── */
 
 .chat-panel {
   background: var(--bg2);
-  border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -2185,14 +2310,7 @@ li:hover .folder-count {
   background: transparent;
 }
 
-/* ── 16. Bottom-left buttons — gold tint ─────────────────────────────────── */
-
-[data-theme="spellbook"] .gear-btn,
-[data-theme="spellbook"] .lock-quick-btn {
-  color: #c8972a;
-}
-
-/* ── 17. Lock screen — locked wooden chest ───────────────────────────────── */
+/* ── 16. Lock screen — locked wooden chest ───────────────────────────────── */
 
 /* Dark dungeon cellar atmosphere behind the chest */
 [data-theme="spellbook"] .lock-screen {
