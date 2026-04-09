@@ -516,9 +516,147 @@ pub async fn seed_notes(
         }
     }
 
+    // Seed the kanban demo folder (best-effort — don't fail seeding if this errors).
+    let _ = seed_kanban_folder(pool.inner()).await;
+
     if indexed == count {
         Ok(format!("{count}"))
     } else {
         Ok(format!("{count}:{indexed}"))
     }
+}
+
+/// Seed a "Kanban Demo" folder with a Status select property, a Priority select
+/// property, and a set of notes spread across the Status columns.
+/// Called at the end of seed_notes; extracted for readability.
+#[cfg(debug_assertions)]
+async fn seed_kanban_folder(pool: &SqlitePool) -> Result<(), String> {
+    // Create the folder.
+    let folder_id: i64 = sqlx::query_scalar(
+        "INSERT INTO folders (name) VALUES ('Kanban Demo') RETURNING id",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Create "Status" select property (position 0).
+    let status_options = r#"["Todo","In Progress","Review","Done"]"#;
+    let status_def_id: i64 = sqlx::query_scalar(
+        "INSERT INTO property_defs (folder_id, name, type, options, position)
+         VALUES (?, 'Status', 'select', ?, 0) RETURNING id",
+    )
+    .bind(folder_id)
+    .bind(status_options)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Create "Priority" select property (position 1).
+    let priority_options = r#"["Low","Medium","High"]"#;
+    let priority_def_id: i64 = sqlx::query_scalar(
+        "INSERT INTO property_defs (folder_id, name, type, options, position)
+         VALUES (?, 'Priority', 'select', ?, 1) RETURNING id",
+    )
+    .bind(folder_id)
+    .bind(priority_options)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Notes: (title, content, status, priority)
+    let notes: &[(&str, &str, &str, &str)] = &[
+        (
+            "Design landing page",
+            "Sketch wireframes and decide on the hero section layout. Review with the team before moving to high-fidelity.",
+            "Todo", "High",
+        ),
+        (
+            "Write API documentation",
+            "Document all public endpoints with request/response examples. Include authentication flow and error codes.",
+            "Todo", "Medium",
+        ),
+        (
+            "Set up CI pipeline",
+            "Configure GitHub Actions to run tests and linting on every pull request. Add a deploy step for staging.",
+            "Todo", "Low",
+        ),
+        (
+            "Implement search indexing",
+            "Integrate the FTS5 virtual table with the Rust backend. Ensure encrypted notes are indexed with decrypted content.",
+            "In Progress", "High",
+        ),
+        (
+            "Refactor authentication module",
+            "Replace the hand-rolled session handling with a proper state machine. Add rate limiting to the unlock endpoint.",
+            "In Progress", "Medium",
+        ),
+        (
+            "Add dark mode support",
+            "Audit all CSS variables and ensure they respond correctly to the prefers-color-scheme media query.",
+            "In Progress", "Low",
+        ),
+        (
+            "Write unit tests for crypto module",
+            "Cover all encryption and decryption paths. Include edge cases: wrong password, corrupted sentinel, empty content.",
+            "Review", "High",
+        ),
+        (
+            "Optimise vector embeddings",
+            "Profile the embedding pipeline and reduce latency. Consider batching requests to the Ollama API.",
+            "Review", "Medium",
+        ),
+        (
+            "Fix calendar date offset bug",
+            "Daily notes created near midnight were being assigned the wrong date in some time zones. Patched and tested.",
+            "Done", "High",
+        ),
+        (
+            "Update dependencies",
+            "Bumped sqlx to 0.8, tauri to 2.x, and svelte to 5. Resolved all breaking changes and deprecation warnings.",
+            "Done", "Low",
+        ),
+        (
+            "Add tag autocomplete",
+            "Implemented #tag suggestions in the editor using a floating dropdown. Filters on the current word after #.",
+            "Done", "Medium",
+        ),
+    ];
+
+    for (title, content, status, priority) in notes {
+        let note_id: i64 = sqlx::query_scalar(
+            "INSERT INTO notes (title, content, folder_id) VALUES (?, ?, ?) RETURNING id",
+        )
+        .bind(title)
+        .bind(content)
+        .bind(folder_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        // Set Status property.
+        sqlx::query(
+            "INSERT INTO note_properties (note_id, def_id, value) VALUES (?, ?, ?)
+             ON CONFLICT(note_id, def_id) DO UPDATE SET value = excluded.value",
+        )
+        .bind(note_id)
+        .bind(status_def_id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        // Set Priority property.
+        sqlx::query(
+            "INSERT INTO note_properties (note_id, def_id, value) VALUES (?, ?, ?)
+             ON CONFLICT(note_id, def_id) DO UPDATE SET value = excluded.value",
+        )
+        .bind(note_id)
+        .bind(priority_def_id)
+        .bind(priority)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
 }

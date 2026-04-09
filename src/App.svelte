@@ -25,6 +25,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   import Calendar from './lib/Calendar.svelte';
   import Chat from './lib/Chat.svelte';
   import Graph from './lib/Graph.svelte';
+  import Kanban from './lib/Kanban.svelte';
   import TabBar from './lib/TabBar.svelte';
   import LockScreen from './lib/LockScreen.svelte';
   import PasswordModal from './lib/PasswordModal.svelte';
@@ -43,6 +44,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   let folders = $state([]);
   let notes = $state([]);
+  let bookmarks = $state([]); // BookmarkEntry[]
+  const bookmarkedNoteIds = $derived(new Set(bookmarks.map(b => b.note_id)));
   let selectedFolderId = $state(null); // null = "All notes"
   let activeNote = $state(null);       // the note currently open in the editor
 
@@ -100,6 +103,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   let allTags = $state([]);
   let tagSearch = $state('');
   const TAG_LIMIT = 3;  let tagsOpen = $state(false);
+  let bookmarksOpen = $state(true);
 
   // Templates
   let templates = $state([]);
@@ -226,6 +230,10 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           }
         },
         { divider: true },
+        bookmarkedNoteIds.has(noteId)
+          ? { label: 'Remove from Bookmarks', action: () => removeBookmark(noteId) }
+          : { label: 'Add to Bookmarks',      action: () => addBookmark(noteId) },
+        { divider: true },
         { label: 'Delete', action: () => deleteNote(noteId), danger: true },
       ];
     } else if (folderLiEl) {
@@ -235,6 +243,9 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         const folder = folders.find(f => f.id === folderId);
         if (folder && !folder.locked) {
           items = [
+            { label: 'Open as Table',  action: async () => { await selectFolder(folderId); tableViewOpen = true; } },
+            { label: 'Open as Kanban', action: () => openKanbanTab(folderId, folder.name) },
+            { divider: true },
             unlockedFolderIds.has(folderId)
               ? { label: 'Remove password', action: () => (folderPwModal = { mode: 'remove', folderId }) }
               : { label: 'Set password',    action: () => (folderPwModal = { mode: 'set',    folderId }) },
@@ -540,6 +551,24 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     }
   }
 
+  async function loadBookmarks() {
+    try {
+      bookmarks = await invoke('list_bookmarks');
+    } catch (e) {
+      // Non-fatal — bookmarks section just stays empty
+    }
+  }
+
+  async function addBookmark(noteId) {
+    await invoke('add_bookmark', { noteId });
+    await loadBookmarks();
+  }
+
+  async function removeBookmark(noteId) {
+    await invoke('remove_bookmark', { noteId });
+    await loadBookmarks();
+  }
+
   async function loadNotes() {
     try {
       if (tagFilter) {
@@ -574,6 +603,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       await loadNotes();
       loadAllTags();
       loadTemplates();
+      loadBookmarks();
       await restoreTabs();
       if (tabs.length === 0) newTab();
     }
@@ -833,11 +863,19 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       tabs = [{ id, type: 'note', noteId: note.id, label: note.title, customLabel: null, readMode: false }];
       activeTabId = id;
     } else {
-      // Update the current tab to point to this note.
-      tabs = tabs.map(t => t.id === activeTabId
-        ? { ...t, type: 'note', noteId: note.id, label: note.title }
-        : t
-      );
+      const currentTab = tabs.find(t => t.id === activeTabId);
+      if (currentTab?.type !== 'note') {
+        // Non-note tab (kanban, graph, etc.) — keep it, open note in a new tab.
+        const id = makeTabId();
+        tabs = [...tabs, { id, type: 'note', noteId: note.id, label: note.title, customLabel: null, readMode: false }];
+        activeTabId = id;
+      } else {
+        // Reuse the current note tab.
+        tabs = tabs.map(t => t.id === activeTabId
+          ? { ...t, type: 'note', noteId: note.id, label: note.title }
+          : t
+        );
+      }
     }
     openNote(note);
   }
@@ -962,6 +1000,31 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     }
     const id = makeTabId();
     tabs = [...tabs, { id, type: 'calendar', noteId: null, label: 'Calendar', customLabel: null }];
+    activeTabId = id;
+    activeNote = null;
+    editorTitle = '';
+    editorContent = '';
+    isDirty = false;
+  }
+
+  function openKanbanTab(folderId, folderName) {
+    if (isDirty) saveNote();
+    selectedFolderId = folderId;
+    tagFilter = null;
+    tableViewOpen = false;
+    loadNotes();
+    invoke('get_property_defs', { folderId }).then(d => { folderHasProperties = d.length > 0; }).catch(() => {});
+    const existing = tabs.find(t => t.type === 'kanban' && t.folderId === folderId);
+    if (existing) {
+      activeTabId = existing.id;
+      activeNote = null;
+      editorTitle = '';
+      editorContent = '';
+      isDirty = false;
+      return;
+    }
+    const id = makeTabId();
+    tabs = [...tabs, { id, type: 'kanban', noteId: null, label: `Kanban — ${folderName}`, customLabel: null, folderId }];
     activeTabId = id;
     activeNote = null;
     editorTitle = '';
@@ -1132,6 +1195,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         noteBacklinks = [];
       }
       await loadNotes();
+      loadBookmarks();
       invoke('remove_note_index', { noteId: id }).catch(() => {});
     } catch (e) {
       showError(e);
@@ -1639,6 +1703,29 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         <button class="collapse-btn" onclick={() => (foldersOpen = false)} title="Collapse">‹</button>
       </div>
 
+      {#if bookmarks.length > 0}
+        <section class="bookmarks-section">
+          <div class="sidebar-section-label">
+            <span>Bookmarks</span>
+            <button class="collapse-btn" onclick={() => (bookmarksOpen = !bookmarksOpen)} title={bookmarksOpen ? 'Collapse' : 'Expand'}>
+              {bookmarksOpen ? '˅' : '›'}
+            </button>
+          </div>
+          {#if bookmarksOpen}
+            <ul class="bookmark-list">
+              {#each bookmarks as bm (bm.note_id)}
+                <li class="bookmark-row" data-note-id={bm.note_id}>
+                  <button class="bookmark-name" onclick={() => openNoteById(bm.note_id)} title={bm.title}>
+                    {bm.title}
+                  </button>
+                  <button class="bookmark-remove icon-btn" onclick={() => removeBookmark(bm.note_id)} title="Remove bookmark">✕</button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </section>
+      {/if}
+
       <ul class="folder-list">
         <li class:active={selectedFolderId === 'all'} data-folder-id="all">
           <div class="folder-row">
@@ -1829,6 +1916,25 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           <option value="created">Created</option>
           <option value="name">Name</option>
         </select>
+        {#if !tagFilter && selectedFolderId && selectedFolderId !== 'all'}
+          <button
+            class="panel-view-btn"
+            class:active={tableViewOpen}
+            title="Table view"
+            onclick={() => {
+              if (isDirty) saveNote();
+              const kanban = tabs.find(t => t.type === 'kanban' && t.folderId === selectedFolderId);
+              if (kanban) tabs = tabs.filter(t => t.id !== kanban.id);
+              if (activeTabId === kanban?.id) { activeNote = null; editorTitle = ''; editorContent = ''; isDirty = false; }
+              tableViewOpen = !tableViewOpen;
+            }}
+          >Table</button>
+          <button
+            class="panel-view-btn"
+            title="Kanban view"
+            onclick={() => openKanbanTab(selectedFolderId, folders.find(f => f.id === selectedFolderId)?.name ?? '')}
+          >Board</button>
+        {/if}
         <button class="collapse-btn" onclick={() => (notesOpen = false)} title="Collapse">‹</button>
       </div>
 
@@ -1897,7 +2003,17 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       />
     </div>
     {#if !searchOpen}
-      {#if activeTab?.type === 'graph'}
+      {#if tableViewOpen && selectedFolderId && selectedFolderId !== 'all'}
+        <div class="tab-fullview">
+          <button class="tab-fullview-close" onclick={() => (tableViewOpen = false)} title="Close table">✕ Close</button>
+          {#key dbKey}
+          <DatabaseView
+            folderId={selectedFolderId}
+            onOpenNote={(id) => { tableViewOpen = false; openNoteById(id); }}
+          />
+          {/key}
+        </div>
+      {:else if activeTab?.type === 'graph'}
         <div class="tab-fullview">
           <button class="tab-fullview-close" onclick={() => closeTab(activeTabId)} title="Close graph">✕ Close</button>
           <Graph
@@ -1915,6 +2031,11 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
             onSelectFolder={(id) => selectFolder(id)}
             dateFormat={dailyNoteFormat}
           />
+        </div>
+      {:else if activeTab?.type === 'kanban'}
+        <div class="tab-fullview">
+          <button class="tab-fullview-close" onclick={() => closeTab(activeTabId)} title="Close kanban">✕ Close</button>
+          <Kanban folderId={activeTab.folderId} onOpenNote={(id) => openNoteById(id)} />
         </div>
       {:else if activeTab?.type === 'chat'}
         <Chat activeNote={null} pendingInsert={null} keepInMemory={keepModelInMemory} onClose={() => closeTab(activeTabId)} />
@@ -1942,8 +2063,16 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
             {isDirty ? 'Save (Ctrl+S)' : indexState === 'indexing' ? 'Indexing…' : indexState === 'error' ? '⚠ Index failed' : 'Saved'}
           </button>
           {#if folderHasProperties}
-            <button class="graph-toggle" onclick={() => { if (isDirty) saveNote(); activeNote = null; tableViewOpen = true; }}>
-              ← Table
+            <button class="graph-toggle" onclick={() => {
+              if (isDirty) saveNote();
+              const kanban = tabs.find(t => t.type === 'kanban' && t.folderId === activeNote.folder_id);
+              if (kanban) tabs = tabs.filter(t => t.id !== kanban.id);
+              activeNote = null; tableViewOpen = true;
+            }}>← Table</button>
+          {/if}
+          {#if activeNote.folder_id && tabs.some(t => t.type === 'kanban' && t.folderId === activeNote.folder_id)}
+            <button class="graph-toggle" onclick={() => openKanbanTab(activeNote.folder_id, folders.find(f => f.id === activeNote.folder_id)?.name ?? '')}>
+              ← Board
             </button>
           {/if}
           {#if activeNote.folder_id}
@@ -2004,24 +2133,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         </div>
       {/if}
     {:else}
-      <div class="editor-toolbar">
-        <div class="toolbar-actions">
-          {#if folderHasProperties && selectedFolderId && selectedFolderId !== 'all'}
-            <button class="graph-toggle" onclick={() => (tableViewOpen = !tableViewOpen)}>
-              {tableViewOpen ? '✕ Table' : 'Table'}
-            </button>
-          {/if}
-        </div>
-      </div>
-      {#if tableViewOpen && selectedFolderId && selectedFolderId !== 'all'}        {#key dbKey}
-        <DatabaseView
-          folderId={selectedFolderId}
-          onOpenNote={(id) => openNoteById(id)}
-        />
-        {/key}
-      {:else}
-        <div class="empty-editor">Select or create a note</div>
-      {/if}
+      <div class="empty-editor">Select or create a note</div>
     {/if}
     {/if}
   </main>
