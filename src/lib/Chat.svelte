@@ -26,7 +26,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   // Shape: { id, title, content, ... } | null
   // pendingInsert: { text: string, seq: number } — injected quote from the editor keybind.
   // keepInMemory: when true, keep_alive: -1 is sent so Ollama never unloads the model.
-  let { activeNote = null, pendingInsert = null, keepInMemory = false, onClose = null } = $props();
+  // llmEnabled: false disables the chat UI and shows a hardware warning banner.
+  let { activeNote = null, pendingInsert = null, keepInMemory = false, llmEnabled = true, onClose = null } = $props();
 
   // ── State ──────────────────────────────────────────────────────────────────
 
@@ -219,6 +220,14 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 </script>
 
 <aside class="chat-panel">
+  {#if !llmEnabled}
+    <div class="chat-hw-banner">
+      <strong>LLM features unavailable.</strong>
+      Your hardware doesn’t meet the minimum requirements for chat. You can override this in
+      <strong>Settings → Hardware</strong>.
+    </div>
+  {/if}
+
   <div class="chat-header">
     <span class="chat-title">Chat</span>
     <input
@@ -304,8 +313,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       onkeydown={handleKeydown}
       placeholder="Message… (Enter to send, Shift+Enter for newline)"
       rows="3"
-      disabled={isLoading}
+      disabled={isLoading || !llmEnabled}
     ></textarea>
-    <button onclick={send} disabled={isLoading || !input.trim()}>Send</button>
+    <button onclick={send} disabled={isLoading || !input.trim() || !llmEnabled}>Send</button>
   </div>
 </aside>

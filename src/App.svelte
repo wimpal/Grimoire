@@ -115,6 +115,12 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   // Settings overlay
   let settingsOpen = $state(false);
   let keepModelInMemory = $state(localStorage.getItem('keepModelInMemory') === 'true');
+
+  // Hardware capability — loaded non-blocking on startup.
+  // 'embeddingOnly' is the safe default until the first response arrives.
+  let hwCapability    = $state('embeddingOnly');
+  let llmForceEnabled = $state(false);
+  const llmEnabled = $derived(hwCapability === 'full' || llmForceEnabled);
   let accent = $state(localStorage.getItem('accent') ?? 'red');
   let theme  = $state(localStorage.getItem('theme')  ?? 'system');
   let dailyNoteFormat = $state(localStorage.getItem('dailyNoteFormat') ?? 'DD-MM-YYYY');
@@ -606,6 +612,11 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       loadBookmarks();
       await restoreTabs();
       if (tabs.length === 0) newTab();
+
+      // Non-blocking — hardware detection can be slow (subprocess calls).
+      invoke('get_hardware_info')
+        .then(hw => { hwCapability = hw.capability; llmForceEnabled = hw.llmForceEnabled; })
+        .catch(() => {});
     }
   });
 
@@ -1644,7 +1655,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       class="titlebar-btn"
       class:titlebar-btn-active={chatOpen}
       onclick={() => (chatOpen = !chatOpen)}
-      title="Toggle chat"
+      title={llmEnabled ? 'Toggle chat' : 'Chat unavailable — check Hardware settings'}
+      disabled={!llmEnabled}
     >
       <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
         <path d="M2 2h11a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H5l-3 3V3a1 1 0 0 1 1-1z"/>
@@ -2038,7 +2050,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           <Kanban folderId={activeTab.folderId} onOpenNote={(id) => openNoteById(id)} />
         </div>
       {:else if activeTab?.type === 'chat'}
-        <Chat activeNote={null} pendingInsert={null} keepInMemory={keepModelInMemory} onClose={() => closeTab(activeTabId)} />
+        <Chat activeNote={null} pendingInsert={null} keepInMemory={keepModelInMemory} {llmEnabled} onClose={() => closeTab(activeTabId)} />
       {:else if activeNote}
       <div class="editor-toolbar">
         <input
@@ -2140,7 +2152,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   {#if chatOpen && activeTab?.type !== 'chat'}
     <button class="panel-divider" aria-label="Resize chat panel" class:dragging={activeDrag?.panel === 'chat'} onmousedown={(e) => startDrag('chat', e)}></button>
-    <Chat {activeNote} pendingInsert={chatInsert} keepInMemory={keepModelInMemory} onClose={() => (chatOpen = false)} />
+    <Chat {activeNote} pendingInsert={chatInsert} keepInMemory={keepModelInMemory} {llmEnabled} onClose={() => (chatOpen = false)} />
   {/if}
 </div>
 
@@ -2170,6 +2182,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     onDateFormatChange={(v) => (dailyNoteFormat = v)}
     {devNativeContextMenu}
     onDevNativeContextMenuChange={(v) => (devNativeContextMenu = v)}
+    {llmEnabled}
+    onHardwareChange={(cap, force) => { hwCapability = cap; llmForceEnabled = force; }}
   />
 {/if}
 

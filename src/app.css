@@ -214,6 +214,15 @@ h2 {
   background: var(--bg3);
 }
 
+.titlebar-btn:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+.titlebar-btn:disabled:hover {
+  background: none;
+}
+
 .titlebar-btn-active {
   opacity: 1;
   color: var(--accent);
@@ -1432,6 +1441,16 @@ li:hover .folder-count {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.chat-hw-banner {
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--danger) 25%, transparent);
+  flex-shrink: 0;
 }
 
 .chat-header {

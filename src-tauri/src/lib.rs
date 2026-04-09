@@ -19,6 +19,7 @@ mod auth;
 mod commands;
 mod crypto;
 mod db;
+mod hardware;
 mod vector;
 
 use std::collections::HashMap;
@@ -131,6 +132,11 @@ pub fn run() {
         commands::list_bookmarks,
         commands::add_bookmark,
         commands::remove_bookmark,
+        commands::get_hardware_info,
+        commands::get_llm_enabled,
+        commands::get_running_models,
+        commands::get_setting,
+        commands::set_setting,
         auth::vault_has_password,
         auth::is_vault_locked,
         auth::unlock_vault,
@@ -195,6 +201,11 @@ pub fn run() {
         commands::list_bookmarks,
         commands::add_bookmark,
         commands::remove_bookmark,
+        commands::get_hardware_info,
+        commands::get_llm_enabled,
+        commands::get_running_models,
+        commands::get_setting,
+        commands::set_setting,
         auth::vault_has_password,
         auth::is_vault_locked,
         auth::unlock_vault,

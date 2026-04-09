@@ -19,7 +19,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   import { invoke } from '@tauri-apps/api/core';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
-  let { onClose, vaultHasPassword = false, onSetVaultPassword, onChangeVaultPassword, onRemoveVaultPassword, onLockVault, keepInMemory = false, onKeepInMemoryChange, accent = 'red', onAccentChange, theme = 'system', onThemeChange, dateFormat = 'DD-MM-YYYY', onDateFormatChange, devNativeContextMenu = false, onDevNativeContextMenuChange } = $props();
+  let { onClose, vaultHasPassword = false, onSetVaultPassword, onChangeVaultPassword, onRemoveVaultPassword, onLockVault, keepInMemory = false, onKeepInMemoryChange, accent = 'red', onAccentChange, theme = 'system', onThemeChange, dateFormat = 'DD-MM-YYYY', onDateFormatChange, devNativeContextMenu = false, onDevNativeContextMenuChange, llmEnabled = true, onHardwareChange = (_cap, _force) => {} } = $props();
 
   const isDev = import.meta.env.DEV;
 
@@ -27,6 +27,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   const sections = $derived([
     { id: 'llm',        label: 'LLM' },
+    { id: 'hardware',   label: 'Hardware' },
     { id: 'appearance', label: 'Appearance' },
     { id: 'security',   label: 'Security' },
     { id: 'privacy',    label: 'Privacy' },
@@ -34,6 +35,79 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     { id: 'keybinds',   label: 'Keybinds' },
     ...(isDev ? [{ id: 'developer', label: 'Developer' }] : []),
   ]);
+
+  // ── Hardware state ───────────────────────────────────────────────────────────
+
+  let hw             = $state(null);  // HardwareReport | null
+  let hwLoading      = $state(false);
+  let hwError        = $state('');
+  let runningModels  = $state([]);    // RunningModel[]
+
+  function fmtMb(mb) {
+    if (mb == null) return '—';
+    return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`;
+  }
+
+  function pct(used, total) {
+    if (!total) return 0;
+    return Math.min(100, Math.round((used / total) * 100));
+  }
+
+  function capabilityLabel(cap) {
+    if (cap === 'full')           return 'Full LLM support';
+    if (cap === 'embeddingOnly')  return 'Embedding only';
+    return 'Insufficient hardware';
+  }
+
+  async function refreshHardware() {
+    hw = null;
+    hwLoading = true;
+    try {
+      [hw, runningModels] = await Promise.all([
+        invoke('get_hardware_info'),
+        invoke('get_running_models'),
+      ]);
+      hwError = '';
+    } catch (e) {
+      hwError = String(e);
+    } finally {
+      hwLoading = false;
+    }
+  }
+
+  async function handleForceToggle(e) {
+    const val = e.currentTarget.checked;
+    await invoke('set_setting', { key: 'llm_force_enabled', value: String(val) });
+    hw = { ...hw, llmForceEnabled: val };
+    onHardwareChange(hw.capability, val);
+  }
+
+  $effect(() => {
+    if (activeSection !== 'hardware') return;
+
+    // Initial load.
+    if (hw === null && !hwLoading) {
+      hwLoading = true;
+      Promise.all([
+        invoke('get_hardware_info'),
+        invoke('get_running_models'),
+      ])
+        .then(([r, models]) => { hw = r; runningModels = models; hwError = ''; })
+        .catch(e => { hwError = String(e); })
+        .finally(() => { hwLoading = false; });
+    }
+
+    // Poll hardware + running models every 5 s while the hardware tab is open.
+    const id = setInterval(() => {
+      Promise.all([
+        invoke('get_hardware_info'),
+        invoke('get_running_models'),
+      ])
+        .then(([r, models]) => { hw = r; runningModels = models; })
+        .catch(() => {});
+    }, 5000);
+    return () => clearInterval(id);
+  });
 
   // ── Placeholder state (no backend yet) ────────────────────────────────────
 
@@ -129,6 +203,104 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
             <option value="mxbai-embed-large">mxbai-embed-large · higher quality</option>
           </select>
         </div>
+
+      {:else if activeSection === 'hardware'}
+        <h3>Hardware</h3>
+
+        {#if hwLoading}
+          <p class="settings-notice">Detecting hardware…</p>
+        {:else if hwError}
+          <p class="settings-notice hw-error">{hwError}</p>
+          <button class="settings-action-btn" onclick={refreshHardware}>Retry</button>
+        {:else if hw}
+          <div class="hw-capability-row">
+            <span class="hw-badge hw-badge-{hw.capability}">{capabilityLabel(hw.capability)}</span>
+            <button class="settings-action-btn" onclick={refreshHardware}>Refresh</button>
+          </div>
+
+          <div class="hw-card">
+            <div class="hw-card-title">CPU</div>
+            <div class="hw-row">
+              <span class="hw-label">Model</span>
+              <span class="hw-value">{hw.cpuName}</span>
+            </div>
+            <div class="hw-row">
+              <span class="hw-label">Cores</span>
+              <span class="hw-value">{hw.cpuCores}</span>
+            </div>
+          </div>
+
+          <div class="hw-card">
+            <div class="hw-card-title">Memory</div>
+            <div class="hw-row">
+              <span class="hw-label">Used <span class="hw-label-note">(incl. cache)</span></span>
+              <span class="hw-value">{fmtMb(hw.ramUsedMb)} / {fmtMb(hw.ramTotalMb)}</span>
+            </div>
+            <div class="hw-bar"><div class="hw-bar-fill" style="width: {pct(hw.ramUsedMb, hw.ramTotalMb)}%"></div></div>
+            <div class="hw-row">
+              <span class="hw-label">Grimoire</span>
+              <span class="hw-value">{fmtMb(hw.ramGrimoireMb)}</span>
+            </div>
+          </div>
+
+          {#if hw.gpus.length === 0}
+            <div class="hw-card">
+              <div class="hw-card-title">GPU</div>
+              <p class="hw-empty">No GPU detected</p>
+            </div>
+          {:else}
+            {#each hw.gpus as gpu}
+              <div class="hw-card">
+                <div class="hw-card-header">
+                  <span class="hw-card-title">{gpu.name}</span>
+                  {#if gpu.isUnifiedMemory}
+                    <span class="hw-tag">Unified Memory</span>
+                  {/if}
+                </div>
+                {#if gpu.vramTotalMb != null}
+                  <div class="hw-row">
+                    <span class="hw-label">VRAM</span>
+                    <span class="hw-value">{gpu.vramUsedMb != null ? `${fmtMb(gpu.vramUsedMb)} / ` : ''}{fmtMb(gpu.vramTotalMb)}</span>
+                  </div>
+                  <div class="hw-bar">
+                    {#if gpu.vramUsedMb != null}
+                      <div class="hw-bar-fill" style="width: {pct(gpu.vramUsedMb, gpu.vramTotalMb)}%"></div>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          {/if}
+
+          {#if hw.capability !== 'full'}
+            <div class="setting-row">
+              <div class="setting-label">
+                <span class="setting-name">Force enable LLM features</span>
+                <span class="setting-desc">Override the hardware check and enable LLM features anyway. Performance may be degraded on hardware below the recommended threshold.</span>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" checked={hw.llmForceEnabled} onchange={handleForceToggle} />
+                <span class="toggle-label">{hw.llmForceEnabled ? 'On' : 'Off'}</span>
+              </label>
+            </div>
+          {/if}
+
+          <div class="hw-card">
+            <div class="hw-card-title">Running models</div>
+            {#if runningModels.length === 0}
+              <p class="hw-empty">No models loaded</p>
+            {:else}
+              {#each runningModels as m}
+                <div class="hw-row">
+                  <span class="hw-label hw-model-name">{m.name}</span>
+                  <span class="hw-value">
+                    {#if m.vramMb != null}{fmtMb(m.vramMb)} VRAM &nbsp;{/if}{#if m.pinned}<span class="hw-tag hw-tag-pinned">Pinned</span>{/if}
+                  </span>
+                </div>
+              {/each}
+            {/if}
+          </div>
+        {/if}
 
       {:else if activeSection === 'appearance'}
         <h3>Appearance</h3>
@@ -345,7 +517,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 <style>
   .settings-overlay {
     position: fixed;
-    inset: 0;
+    inset: 36px 0 0 36px;
     z-index: 50;
     background: var(--bg);
     display: flex;
@@ -666,5 +838,136 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     background: var(--bg2);
     font: 12px var(--mono);
     color: var(--text-h);
+  }
+
+  /* ── Hardware tab ────────────────────────────────────────────────── */
+
+  .hw-capability-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .hw-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: var(--sans);
+  }
+
+  .hw-badge-full {
+    background: var(--accent-bg);
+    color: var(--accent);
+  }
+
+  .hw-badge-embeddingOnly {
+    background: var(--bg3);
+    color: var(--text-h);
+  }
+
+  .hw-badge-insufficient {
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    color: var(--danger);
+  }
+
+  .hw-card {
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 12px 16px;
+    margin-bottom: 12px;
+    background: var(--bg2);
+  }
+
+  .hw-card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+
+  .hw-card-title {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text);
+    margin-bottom: 6px;
+    display: block;
+  }
+
+  .hw-card-header .hw-card-title {
+    margin-bottom: 0;
+  }
+
+  .hw-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 3px 0;
+  }
+
+  .hw-label {
+    font-size: 12px;
+    color: var(--text);
+  }
+
+  .hw-label-note {
+    font-size: 10px;
+    color: var(--text-muted, var(--text));
+    opacity: 0.6;
+    font-style: italic;
+  }
+
+  .hw-value {
+    font-size: 12px;
+    color: var(--text-h);
+    font-family: var(--mono);
+  }
+
+  .hw-bar {
+    height: 4px;
+    background: var(--bg3);
+    border-radius: 2px;
+    margin: 4px 0 6px;
+    overflow: hidden;
+  }
+
+  .hw-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+
+  .hw-tag {
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 3px;
+    background: var(--bg3);
+    color: var(--text);
+  }
+
+  .hw-tag-pinned {
+    background: var(--accent-muted, color-mix(in srgb, var(--accent) 20%, transparent));
+    color: var(--accent);
+  }
+
+  .hw-model-name {
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  .hw-empty {
+    font-size: 12px;
+    color: var(--text);
+    margin: 4px 0 0;
+    font-style: italic;
+  }
+
+  .hw-error {
+    color: var(--danger);
   }
 </style>
