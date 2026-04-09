@@ -649,6 +649,64 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     folderExpanded = collapsed;
   }
 
+  // ── Folder tree keyboard navigation ──────────────────────────────────────
+  // Queries only visible (in-DOM) primary row buttons in the folder tree.
+  // Collapsed children are {#if}-gated out of the DOM, so this naturally
+  // returns only items the user can see.
+  function getFolderTreeButtons() {
+    return /** @type {HTMLElement[]} */ (
+      Array.from(document.querySelectorAll('.folder-list .folder-row .row-btn:not([disabled])'))
+    );
+  }
+
+  async function handleFolderTreeKeydown(e) {
+    if (!['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+
+    const btns = getFolderTreeButtons();
+    const focused = /** @type {HTMLElement | null} */ (document.activeElement);
+    const idx = focused ? btns.indexOf(focused) : -1;
+
+    if (e.key === 'ArrowDown') {
+      btns[Math.min(idx + 1, btns.length - 1)]?.focus();
+    } else if (e.key === 'ArrowUp') {
+      btns[Math.max(idx - 1, 0)]?.focus();
+    } else if (e.key === 'ArrowRight') {
+      // Expand a collapsed folder (find the expand button in the same row).
+      const row = focused?.closest('.folder-row');
+      const expandBtn = /** @type {HTMLElement | null} */ (
+        row?.querySelector('.folder-expand-btn[aria-expanded="false"]')
+      );
+      if (expandBtn) {
+        expandBtn.click();
+        await tick();
+        // Move to first child after expanding.
+        const freshBtns = getFolderTreeButtons();
+        freshBtns[Math.min(idx + 1, freshBtns.length - 1)]?.focus();
+      }
+    } else if (e.key === 'ArrowLeft') {
+      const row = focused?.closest('.folder-row');
+      const expandBtn = /** @type {HTMLElement | null} */ (
+        row?.querySelector('.folder-expand-btn[aria-expanded="true"]')
+      );
+      if (expandBtn) {
+        // Collapse this folder.
+        expandBtn.click();
+      } else {
+        // Move to parent row's primary button.
+        const parentLi = focused?.closest('.folder-children')?.parentElement;
+        const parentBtn = /** @type {HTMLElement | null} */ (
+          parentLi?.querySelector(':scope > .folder-row .row-btn')
+        );
+        if (parentBtn) parentBtn.focus();
+      }
+    } else if (e.key === 'Home') {
+      btns[0]?.focus();
+    } else if (e.key === 'End') {
+      btns[btns.length - 1]?.focus();
+    }
+  }
+
   // Inline rename — set on a newly-created item awaiting its first name.
   let inlineRenaming = $state(null); // { id, type: 'folder'|'note', value }
 
@@ -1522,7 +1580,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 {:else}
 
 {#if errorMsg}
-  <div class="error-banner">{errorMsg}</div>
+  <div class="error-banner" role="alert">{errorMsg}</div>
 {/if}
 
 <!-- Password modals (rendered above everything) -->
@@ -1738,8 +1796,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         </section>
       {/if}
 
-      <ul class="folder-list">
-        <li class:active={selectedFolderId === 'all'} data-folder-id="all">
+      <ul class="folder-list" role="tree" aria-label="Folders" onkeydown={handleFolderTreeKeydown}>
+        <li class:active={selectedFolderId === 'all'} data-folder-id="all" role="treeitem" aria-selected={selectedFolderId === 'all'}>
           <div class="folder-row">
             <span class="folder-expand-spacer"></span>
             <button class="row-btn" onclick={() => selectFolder('all')}>All Notes</button>
@@ -1750,6 +1808,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           class:drag-over={dragOverFolderId === 'unfiled'}
           class:drag-active={isDragging || !!draggingFolderId}
           data-folder-id="unfiled"
+          role="treeitem"
+          aria-selected={selectedFolderId === null}
           ondragover={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; dragOverFolderId = 'unfiled'; }}
           ondragleave={(e) => { if (dragOverFolderId === 'unfiled' && !e.currentTarget.contains(/** @type {Node} */ (e.relatedTarget))) dragOverFolderId = null; }}
           ondrop={(e) => {
@@ -1778,6 +1838,9 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
             class:drag-over={dragOverFolderId === folder.id}
             class:drag-active={(isDragging || !!draggingFolderId) && !folder.locked}
             data-folder-id={folder.id}
+            role="treeitem"
+            aria-selected={selectedFolderId === folder.id}
+            aria-expanded={node.children.length > 0 ? (folderExpanded[folder.id] ?? true) : undefined}
             draggable={!folder.locked}
             ondragstart={(e) => !folder.locked && onFolderRowDragStart(e, folder.id)}
             ondragend={onFolderRowDragEnd}
@@ -1787,7 +1850,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           >
             <div class="folder-row">
               {#if node.children.length > 0}
-                <button class="folder-expand-btn" onclick={() => toggleFolder(folder.id)} title={isExpanded ? 'Collapse' : 'Expand'}>
+                <button class="folder-expand-btn" onclick={() => toggleFolder(folder.id)} title={isExpanded ? 'Collapse' : 'Expand'} aria-expanded={isExpanded} aria-label={isExpanded ? `Collapse ${folder.name}` : `Expand ${folder.name}`}>
                   {isExpanded ? '▾' : '▸'}
                 </button>
               {:else}
@@ -1828,11 +1891,11 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
                   </button>
                 {/if}
               {/if}
-              <button class="icon-btn danger" onclick={() => deleteFolder(folder.id)} title="Delete folder">✕</button>
+              <button class="icon-btn danger" onclick={() => deleteFolder(folder.id)} title="Delete folder" aria-label="Delete folder {folder.name}">✕</button>
             </div>
 
             {#if isExpanded && node.children.length > 0}
-              <ul class="folder-children">
+              <ul class="folder-children" role="group">
                 {#each node.children as child}
                   {@render renderFolder(child)}
                 {/each}
@@ -1849,7 +1912,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       {#if allTags.length > 0}
         <div class="sidebar-section-label tags-header">
           <span>Tags</span>
-          <button class="collapse-btn" onclick={() => (tagsOpen = !tagsOpen)} title={tagsOpen ? 'Collapse' : 'Expand'}>
+          <button class="collapse-btn" onclick={() => (tagsOpen = !tagsOpen)} title={tagsOpen ? 'Collapse' : 'Expand'} aria-expanded={tagsOpen} aria-label={tagsOpen ? 'Collapse tags' : 'Expand tags'}>
             {tagsOpen ? '˅' : '›'}
           </button>
         </div>
@@ -1883,7 +1946,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       <!-- Templates section -->
       <div class="sidebar-section-label">
         <span>Templates</span>
-        <button class="collapse-btn" onclick={() => (templatesOpen = !templatesOpen)} title={templatesOpen ? 'Collapse' : 'Expand'}>
+        <button class="collapse-btn" onclick={() => (templatesOpen = !templatesOpen)} title={templatesOpen ? 'Collapse' : 'Expand'} aria-expanded={templatesOpen} aria-label={templatesOpen ? 'Collapse templates' : 'Expand templates'}>
           {templatesOpen ? '˅' : '›'}
         </button>
       </div>
@@ -1893,8 +1956,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
             <li>
               <span class="template-name">{t.name}</span>
               {#if !t.builtin}
-                <button class="icon-btn" onclick={() => (editingTemplate = t)} title="Edit template">✎</button>
-                <button class="icon-btn danger" onclick={() => deleteTemplate(t.id)} title="Delete template">✕</button>
+                <button class="icon-btn" onclick={() => (editingTemplate = t)} title="Edit template" aria-label="Edit template {t.name}">✎</button>
+                <button class="icon-btn danger" onclick={() => deleteTemplate(t.id)} title="Delete template" aria-label="Delete template {t.name}">✕</button>
               {/if}
             </li>
           {/each}
@@ -1923,7 +1986,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         {#if tagFilter}
           <button class="clear-filter-btn" onclick={clearTagFilter} title="Clear tag filter">✕</button>
         {/if}
-        <select class="sort-select" bind:value={noteSort} title="Sort notes">
+        <select class="sort-select" bind:value={noteSort} title="Sort notes" aria-label="Sort notes">
           <option value="modified">Modified</option>
           <option value="created">Created</option>
           <option value="name">Name</option>
@@ -1933,6 +1996,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
             class="panel-view-btn"
             class:active={tableViewOpen}
             title="Table view"
+            aria-pressed={tableViewOpen}
+            aria-label="Table view"
             onclick={() => {
               if (isDirty) saveNote();
               const kanban = tabs.find(t => t.type === 'kanban' && t.folderId === selectedFolderId);
@@ -1944,10 +2009,11 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           <button
             class="panel-view-btn"
             title="Kanban view"
+            aria-label="Board view"
             onclick={() => openKanbanTab(selectedFolderId, folders.find(f => f.id === selectedFolderId)?.name ?? '')}
           >Board</button>
         {/if}
-        <button class="collapse-btn" onclick={() => (notesOpen = false)} title="Collapse">‹</button>
+        <button class="collapse-btn" onclick={() => (notesOpen = false)} title="Collapse" aria-label="Collapse notes panel">‹</button>
       </div>
 
       <ul>
@@ -1955,6 +2021,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           <li
             class:active={activeNote?.id === note.id}
             class:locked-row={note.locked}
+            aria-current={activeNote?.id === note.id ? 'page' : undefined}
             data-note-id={note.id}
             draggable={!note.locked}
             ondragstart={(e) => !note.locked && onNoteDragStart(e, note)}
@@ -1977,11 +2044,11 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
                 aria-hidden="true"
               >⠇</span>
               <button class="row-btn note-title" onclick={(e) => e.ctrlKey ? openNoteInNewTab(note) : navigateToNote(note)}>{note.title}</button>
-              <button class="icon-btn danger" onclick={() => deleteNote(note.id)} title="Delete note">✕</button>
+              <button class="icon-btn danger" onclick={() => deleteNote(note.id)} title="Delete note" aria-label="Delete note {note.title}">✕</button>
             {/if}
           </li>
         {:else}
-          <li class="empty">No notes here</li>
+          <li class="empty" role="status">No notes here</li>
         {/each}
       </ul>
 
@@ -2058,6 +2125,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           bind:value={editorTitle}
           oninput={markDirty}
           placeholder="Note title"
+          aria-label="Note title"
         />
         <div class="toolbar-actions">
           <label>
@@ -2071,11 +2139,11 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
               {/each}
             </select>
           </label>
-          <button onclick={saveNote} disabled={!isDirty} class:index-error={!isDirty && indexState === 'error'}>
+          <button onclick={saveNote} disabled={!isDirty} class:index-error={!isDirty && indexState === 'error'} aria-live="polite" aria-atomic="true">
             {isDirty ? 'Save (Ctrl+S)' : indexState === 'indexing' ? 'Indexing…' : indexState === 'error' ? '⚠ Index failed' : 'Saved'}
           </button>
           {#if folderHasProperties}
-            <button class="graph-toggle" onclick={() => {
+            <button class="graph-toggle" aria-label="Switch to table view" onclick={() => {
               if (isDirty) saveNote();
               const kanban = tabs.find(t => t.type === 'kanban' && t.folderId === activeNote.folder_id);
               if (kanban) tabs = tabs.filter(t => t.id !== kanban.id);
@@ -2083,14 +2151,14 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
             }}>← Table</button>
           {/if}
           {#if activeNote.folder_id && tabs.some(t => t.type === 'kanban' && t.folderId === activeNote.folder_id)}
-            <button class="graph-toggle" onclick={() => openKanbanTab(activeNote.folder_id, folders.find(f => f.id === activeNote.folder_id)?.name ?? '')}>
+            <button class="graph-toggle" aria-label="Switch to board view" onclick={() => openKanbanTab(activeNote.folder_id, folders.find(f => f.id === activeNote.folder_id)?.name ?? '')}>
               ← Board
             </button>
           {/if}
           {#if activeNote.folder_id}
-            <button class="graph-toggle" onclick={() => revealFolder(activeNote.folder_id)} title="Reveal in folder panel">Reveal</button>
+            <button class="graph-toggle" onclick={() => revealFolder(activeNote.folder_id)} title="Reveal in folder panel" aria-label="Reveal in folder panel">Reveal</button>
           {/if}
-          <button class="graph-toggle" onclick={toggleReadMode}>{activeTab?.readMode ? 'Edit' : 'Read'}</button>
+          <button class="graph-toggle" aria-label={activeTab?.readMode ? 'Switch to edit mode' : 'Switch to read mode'} onclick={toggleReadMode}>{activeTab?.readMode ? 'Edit' : 'Read'}</button>
           <span class="word-count">{wordCount} word{wordCount === 1 ? '' : 's'} · {readingTime} min</span>
         </div>
       </div>

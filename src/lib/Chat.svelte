@@ -245,7 +245,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     {/if}
   </div>
 
-  <div class="chat-messages" bind:this={messagesEl}>
+  <div class="chat-messages" role="log" aria-live="polite" aria-atomic="false" bind:this={messagesEl}>
     {#each messages as msg, i (i)}
       {#if msg.role !== 'assistant' || msg.content !== ''}
         <div class="chat-message {msg.role}">
@@ -312,9 +312,10 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       bind:value={input}
       onkeydown={handleKeydown}
       placeholder="Message… (Enter to send, Shift+Enter for newline)"
+      aria-label="Message"
       rows="3"
       disabled={isLoading || !llmEnabled}
     ></textarea>
-    <button onclick={send} disabled={isLoading || !input.trim() || !llmEnabled}>Send</button>
+    <button onclick={send} disabled={isLoading || !input.trim() || !llmEnabled} aria-busy={isLoading}>Send</button>
   </div>
 </aside>

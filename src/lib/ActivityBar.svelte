@@ -26,6 +26,7 @@ This file is part of Grimoire — licensed under GPL-3.0 or later. -->
       onclick={onSearch}
       title="Search (Ctrl+F)"
       aria-label="Search"
+      aria-current={searchActive ? 'page' : undefined}
     >
       <svg width="16" height="16" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
         <circle cx="6.5" cy="6.5" r="4.5"/>

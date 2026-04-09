@@ -16,6 +16,7 @@ You should have received a copy of the GNU General Public License
 along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
 <script>
+  import { focusTrap } from './utils/focusTrap.js';
   /**
    * TemplateModal — modal for creating or editing a user-defined template.
    *
@@ -97,10 +98,10 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="modal-backdrop" onclick={onCancel} onkeydown={handleKeydown} role="dialog" tabindex="-1">
+<div class="modal-backdrop" onclick={onCancel} onkeydown={handleKeydown} role="dialog" aria-modal="true" aria-labelledby="tmpl-modal-title" tabindex="-1">
   <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="modal" onclick={(e) => e.stopPropagation()}>
-    <h2 class="modal-title">{isEditing ? 'Edit Template' : 'New Template'}</h2>
+  <div class="modal" use:focusTrap onclick={(e) => e.stopPropagation()}>
+    <h2 id="tmpl-modal-title" class="modal-title">{isEditing ? 'Edit Template' : 'New Template'}</h2>
 
     <label class="field">
       <span>Template name</span>
@@ -175,6 +176,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
                 onclick={() => removeProp(i)}
                 disabled={loading}
                 title="Remove"
+                aria-label="Remove property {prop.name || (i + 1)}"
               >✕</button>
             </div>
           {/each}

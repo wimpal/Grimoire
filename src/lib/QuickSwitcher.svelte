@@ -17,6 +17,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
 <script>
   import { invoke } from '@tauri-apps/api/core';
+  import { focusTrap } from './utils/focusTrap.js';
 
   /**
    * @type {{
@@ -85,7 +86,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <div class="qs-backdrop" onclick={onClose} role="dialog" aria-modal="true" aria-label="Quick Switcher" tabindex="-1">
   <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="qs-panel" onclick={(e) => e.stopPropagation()}>
+  <div class="qs-panel" use:focusTrap onclick={(e) => e.stopPropagation()}>
     <input
       bind:this={inputEl}
       bind:value={query}

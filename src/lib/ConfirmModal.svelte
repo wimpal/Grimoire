@@ -16,6 +16,7 @@ You should have received a copy of the GNU General Public License
 along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
 <script>
+  import { focusTrap } from './utils/focusTrap.js';
   /**
    * ConfirmModal — a centered confirmation dialog replacing browser confirm().
    *
@@ -47,16 +48,16 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="backdrop" onclick={onCancel} onkeydown={handleKeydown} role="dialog" aria-modal="true" tabindex="-1">
+<div class="backdrop" onclick={onCancel} onkeydown={handleKeydown} role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby={message ? 'confirm-msg' : undefined} tabindex="-1">
   <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="modal" onclick={(e) => e.stopPropagation()}>
+  <div class="modal" use:focusTrap onclick={(e) => e.stopPropagation()}>
     <div class="modal-header">
-      <h2 class="modal-title">{title}</h2>
+      <h2 id="confirm-title" class="modal-title">{title}</h2>
       <button class="close-btn" onclick={onCancel} aria-label="Close">✕</button>
     </div>
 
     {#if message}
-      <p class="modal-message">{message}</p>
+      <p id="confirm-msg" class="modal-message">{message}</p>
     {/if}
 
     <div class="modal-actions">

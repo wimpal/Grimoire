@@ -18,6 +18,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 <script>
   import { invoke } from '@tauri-apps/api/core';
   import { open as openDialog } from '@tauri-apps/plugin-dialog';
+  import { focusTrap } from './utils/focusTrap.js';
 
   let { onClose, vaultHasPassword = false, onSetVaultPassword, onChangeVaultPassword, onRemoveVaultPassword, onLockVault, keepInMemory = false, onKeepInMemoryChange, accent = 'red', onAccentChange, theme = 'system', onThemeChange, dateFormat = 'DD-MM-YYYY', onDateFormatChange, devNativeContextMenu = false, onDevNativeContextMenuChange, llmEnabled = true, onHardwareChange = (_cap, _force) => {} } = $props();
 
@@ -132,7 +133,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   }
 </script>
 
-<div class="settings-overlay">
+<div class="settings-overlay" use:focusTrap>
   <div class="settings-header">
     <span class="settings-title">Settings</span>
     <button class="settings-close" onclick={onClose}>✕ Close</button>

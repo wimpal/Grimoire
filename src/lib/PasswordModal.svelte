@@ -16,6 +16,7 @@ You should have received a copy of the GNU General Public License
 along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
 <script>
+  import { focusTrap } from './utils/focusTrap.js';
   /**
    * PasswordModal — reusable modal for password prompts.
    *
@@ -74,16 +75,16 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="modal-backdrop" onclick={onCancel} onkeydown={handleKeydown} role="dialog" tabindex="-1">
+<div class="modal-backdrop" onclick={onCancel} onkeydown={handleKeydown} role="dialog" aria-modal="true" aria-labelledby="pw-modal-title" tabindex="-1">
   <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="modal" onclick={(e) => e.stopPropagation()}>
-    <h2 class="modal-title">{title}</h2>
+  <div class="modal" use:focusTrap onclick={(e) => e.stopPropagation()}>
+    <h2 id="pw-modal-title" class="modal-title">{title}</h2>
 
     {#if warning}
       <p class="modal-warning">{warning}</p>
       {#if requireAck}
-        <label class="modal-ack">
-          <input type="checkbox" bind:checked={acked} />
+        <label class="modal-ack" for="pw-modal-ack">
+          <input id="pw-modal-ack" type="checkbox" bind:checked={acked} />
           I understand
         </label>
       {/if}
@@ -95,6 +96,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       bind:value={password}
       onkeydown={handleKeydown}
       placeholder="Password…"
+      aria-label="Password"
       disabled={loading}
     />
 

@@ -383,6 +383,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
 <canvas
   bind:this={canvas}
+  aria-label="Note relationship graph. Use the mouse or touch to pan, zoom, and select nodes."
   onpointermove={onPointerMove}
   onpointerdown={onPointerDown}
   onpointerup={onPointerUp}

@@ -23,6 +23,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
    *   folderId   — the folder whose notes and property defs to display
    *   onOpenNote — callback(noteId) to open a note in the editor
    */
+  import { tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
 
   let { folderId, onOpenNote = () => {} } = $props();
@@ -274,6 +275,49 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     persistOrders();
   }
 
+  // ── Keyboard move ────────────────────────────────────────────────────────
+
+  let movingNoteId     = $state(null);   // note currently being keyboard-moved
+  let moveAnnouncement = $state('');     // text announced to screen readers
+
+  async function handleCardKeydown(e, note, col) {
+    if (movingNoteId === note.id) {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        const colIdx = columns.findIndex(c => c.key === col.key);
+        const newIdx = e.key === 'ArrowLeft' ? colIdx - 1 : colIdx + 1;
+        if (newIdx < 0 || newIdx >= columns.length) {
+          moveAnnouncement = `Already at the ${e.key === 'ArrowLeft' ? 'first' : 'last'} column.`;
+          return;
+        }
+        const newCol = columns[newIdx];
+        if (!groupByDefId) return;
+        const newValue = newCol.key === '__unset__' ? '' : newCol.key;
+        try {
+          await invoke('set_note_property', { noteId: note.id, defId: groupByDefId, value: newValue });
+          await refreshNotes();
+          moveAnnouncement = `Moved to ${newCol.label}. Press left or right to continue, Enter to confirm, Escape to cancel.`;
+          await tick();
+          /** @type {HTMLElement | null} */ (document.querySelector(`[data-note-id="${note.id}"] .kanban-card-title`))?.focus();
+        } catch (err) {
+          errorMsg = String(err);
+        }
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        movingNoteId = null;
+        moveAnnouncement = 'Note placed.';
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        movingNoteId = null;
+        moveAnnouncement = 'Move cancelled.';
+      }
+    } else if (e.key === 'm' || e.key === 'M') {
+      e.preventDefault();
+      movingNoteId = note.id;
+      moveAnnouncement = `Moving "${note.title}" from ${col.label}. Press left or right arrows to move between columns, Enter to confirm, Escape to cancel.`;
+    }
+  }
+
   // ── Create note in column ──────────────────────────────────────────────────
 
   let creating = $state(null); // colKey currently being created in
@@ -297,6 +341,9 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 </script>
 
 <div class="kanban-container">
+
+  <!-- Screen-reader announcement region for keyboard move actions -->
+  <div class="sr-only" aria-live="assertive" aria-atomic="true">{moveAnnouncement}</div>
 
   <!-- ── Toolbar ───────────────────────────────────────────────────────── -->
   <div class="kanban-toolbar">
@@ -366,7 +413,9 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
                 class="kanban-card"
                 class:drop-above={dragOverCardId === note.id && dragInsertAbove}
                 class:drop-below={dragOverCardId === note.id && !dragInsertAbove}
-                draggable="true"
+                class:moving={movingNoteId === note.id}
+                data-note-id={note.id}
+                draggable={movingNoteId !== note.id}
                 ondragstart={(e) => onCardDragStart(e, note.id, col.key)}
                 ondragover={(e) => onCardDragOver(e, note.id)}
                 ondragleave={onCardDragLeave}
@@ -374,8 +423,9 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
               >
                 <button
                   class="kanban-card-title"
+                  aria-label="{note.title}{movingNoteId === note.id ? '. Moving. Press left or right to change column, Enter to confirm, Escape to cancel.' : '. Press M to move between columns.'}"
                   onclick={() => onOpenNote(note.id)}
-                  title="Open note"
+                  onkeydown={(e) => handleCardKeydown(e, note, col)}
                 >{note.title}</button>
                 {#if visibleDefIds.size > 0}
                   <dl class="kanban-card-props">

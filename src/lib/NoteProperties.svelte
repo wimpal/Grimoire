@@ -121,7 +121,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
 {#if folderId && (defs.length > 0 || !loading)}
 <div class="note-properties">
-  <button class="props-toggle" onclick={() => (open = !open)}>
+  <button class="props-toggle" aria-expanded={open} onclick={() => (open = !open)}>
     <span class="props-toggle-icon">{open ? '˅' : '›'}</span>
     <span class="props-toggle-label">Properties</span>
     {#if !open && defs.length > 0}
@@ -142,6 +142,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
                 onblur={(e) => setValue(prop.def_id, e.currentTarget.value)}
                 onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
                 class="prop-input"
+                aria-label={prop.name}
                 placeholder="—"
               />
             {:else if prop.type === 'number'}
@@ -159,19 +160,23 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
                 value={prop.value}
                 onchange={(e) => setValue(prop.def_id, e.currentTarget.value)}
                 class="prop-input"
+                aria-label={prop.name}
               />
             {:else if prop.type === 'boolean'}
-              <label class="prop-checkbox">
+              <label class="prop-checkbox" for="prop-{prop.def_id}">
                 <input
+                  id="prop-{prop.def_id}"
                   type="checkbox"
                   checked={prop.value === 'true'}
                   onchange={(e) => handleBooleanChange(prop.def_id, e.currentTarget.checked)}
+                  aria-label={prop.name}
                 />
               </label>
             {:else if prop.type === 'select'}
               <select
                 class="prop-input"
                 value={prop.value}
+                aria-label={prop.name}
                 onchange={(e) => setValue(prop.def_id, e.currentTarget.value)}
               >
                 <option value="">—</option>
@@ -181,7 +186,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
               </select>
             {/if}
           </div>
-          <button class="prop-delete icon-btn danger" onclick={() => deleteDef(prop.def_id)} title="Remove property">✕</button>
+          <button class="prop-delete icon-btn danger" onclick={() => deleteDef(prop.def_id)} title="Remove property" aria-label="Remove property {prop.name}">✕</button>
         </div>
       {/each}
     </div>
@@ -192,9 +197,10 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           class="prop-input"
           bind:value={newName}
           placeholder="Property name"
+          aria-label="New property name"
           onkeydown={(e) => { if (e.key === 'Enter') addProperty(); if (e.key === 'Escape') adding = false; }}
         />
-        <select class="prop-input" bind:value={newType}>
+        <select class="prop-input" bind:value={newType} aria-label="Property type">
           <option value="text">Text</option>
           <option value="number">Number</option>
           <option value="date">Date</option>

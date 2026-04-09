@@ -158,7 +158,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     {/if}
   </div>
 
-  <div class="search-body" role="region" aria-label="Search results" aria-live="polite">
+  <div class="search-body" role="region" aria-label="Search results" aria-live="polite" aria-atomic="true" aria-busy={loading}>
     {#if loading}
       <span class="status-msg">Searching…</span>
     {:else if errorMsg}

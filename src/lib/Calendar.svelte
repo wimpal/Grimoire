@@ -17,6 +17,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
 <script>
   import { invoke } from '@tauri-apps/api/core';
+  import { tick } from 'svelte';
 
   /**
    * @type {{
@@ -105,6 +106,47 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   }
 
   const todayISO = toISODate(new Date());
+
+  // ── Calendar keyboard navigation ───────────────────────────────────────────
+
+  // The day number (1–31) currently focused via keyboard in the monthly calendar.
+  let calendarFocusedDay = $state(null);
+
+  let calGridEl = $state(null);
+
+  const daysInCurrentMonth = $derived(new Date(viewYear, viewMonth + 1, 0).getDate());
+
+  async function handleCalGridKeydown(e) {
+    if (!['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp', 'Enter', ' '].includes(e.key)) return;
+    e.preventDefault();
+
+    if (calendarFocusedDay === null) {
+      // First key: land on today if in this month, else day 1.
+      const today = new Date();
+      calendarFocusedDay =
+        today.getFullYear() === viewYear && today.getMonth() === viewMonth
+          ? today.getDate()
+          : 1;
+      await tick();
+      calGridEl?.querySelector(`[data-day="${calendarFocusedDay}"]`)?.focus();
+      return;
+    }
+
+    if (e.key === 'Enter' || e.key === ' ') {
+      openDay(calendarFocusedDay);
+      return;
+    }
+
+    let next = calendarFocusedDay;
+    if (e.key === 'ArrowRight') next = Math.min(next + 1, daysInCurrentMonth);
+    else if (e.key === 'ArrowLeft') next = Math.max(next - 1, 1);
+    else if (e.key === 'ArrowDown') next = Math.min(next + 7, daysInCurrentMonth);
+    else if (e.key === 'ArrowUp') next = Math.max(next - 7, 1);
+
+    calendarFocusedDay = next;
+    await tick();
+    calGridEl?.querySelector(`[data-day="${next}"]`)?.focus();
+  }
 
   // ── Calendar grid derived values ───────────────────────────────────────────
 
@@ -347,7 +389,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           <button class="cal-today-btn" onclick={goToday} aria-label="Go to today">Today</button>
         </div>
 
-        <div class="cal-grid" role="grid" aria-label={monthLabel}>
+        <div class="cal-grid" role="grid" aria-label={monthLabel} tabindex="-1" bind:this={calGridEl} onkeydown={handleCalGridKeydown}>
           <!-- Day-of-week header row -->
           {#each DOW_LABELS as label}
             <div class="cal-dow" role="columnheader">{label}</div>
@@ -356,15 +398,18 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           <!-- Day cells -->
           {#each calendarCells as cell}
             {#if cell === null}
-              <div class="cal-cell cal-empty" role="gridcell"></div>
+              <div class="cal-cell cal-empty" role="gridcell" aria-hidden="true"></div>
             {:else}
               <button
                 class="cal-cell cal-day"
                 class:today={isCellToday(cell)}
                 class:future={isCellFuture(cell)}
                 role="gridcell"
+                data-day={cell}
+                tabindex={calendarFocusedDay === cell ? 0 : (calendarFocusedDay === null && isCellToday(cell) ? 0 : -1)}
+                aria-selected={calendarFocusedDay === cell}
                 aria-label="{cellISO(cell)}{isCellToday(cell) ? ' (today)' : ''}{dailyNoteDates.has(cellISO(cell)) ? ', has note' : ''}"
-                onclick={() => openDay(cell)}
+                onclick={() => { calendarFocusedDay = cell; openDay(cell); }}
               >
                 <span class="cal-day-num">{cell}</span>
                 {#if dailyNoteDates.has(cellISO(cell))}

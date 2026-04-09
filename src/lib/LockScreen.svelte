@@ -56,7 +56,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 <div class="lock-screen">
   <div class="lock-box">
     <h1 class="lock-title">Grimoire</h1>
-    <p class="lock-subtitle">This vault is locked.</p>
+    <p id="lock-subtitle" class="lock-subtitle">This vault is locked.</p>
 
     <div class="lock-field">
       <input
@@ -64,6 +64,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         bind:value={password}
         onkeydown={handleKeydown}
         placeholder="Enter password…"
+        aria-label="Password"
+        aria-describedby="lock-subtitle"
         disabled={loading}
         use:focus
       />
