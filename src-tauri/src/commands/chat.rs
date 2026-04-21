@@ -48,6 +48,7 @@ struct OllamaChatRequest {
 #[derive(Serialize)]
 struct OllamaOptions {
     num_thread: usize,
+    temperature: f32,
 }
 
 impl OllamaOptions {
@@ -55,7 +56,7 @@ impl OllamaOptions {
         let total = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        Self { num_thread: (total / 2).max(1) }
+        Self { num_thread: (total / 2).max(1), temperature: 0.8 }
     }
 }
 

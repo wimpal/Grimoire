@@ -378,6 +378,13 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     chatInsert = { text, seq: (chatInsert?.seq ?? 0) + 1 };
   }
 
+  function insertIntoActiveNote(text) {
+    if (!editorTextareaEl || !activeNote) return;
+    const { selectionStart, value } = editorTextareaEl;
+    editorContent = value.slice(0, selectionStart) + '\n\n' + text + '\n\n' + value.slice(selectionStart);
+    markDirty();
+  }
+
   // Quick Switcher
   let quickSwitcherOpen = $state(false);
 
@@ -605,19 +612,21 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     lockCheckDone = true;
 
     if (!vaultLocked) {
-      await loadFolders();
-      await loadNotes();
+      // Run independent data loads in parallel.
+      await Promise.all([loadFolders(), loadNotes(), restoreTabs()]);
+      if (tabs.length === 0) newTab();
       loadAllTags();
       loadTemplates();
       loadBookmarks();
-      await restoreTabs();
-      if (tabs.length === 0) newTab();
 
       // Non-blocking — hardware detection can be slow (subprocess calls).
       invoke('get_hardware_info')
         .then(hw => { hwCapability = hw.capability; llmForceEnabled = hw.llmForceEnabled; })
         .catch(() => {});
     }
+
+    await tick();
+    await getCurrentWindow().show();
   });
 
   // ── Folder actions ─────────────────────────────────────────────────────────
@@ -1146,25 +1155,31 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       if (!saved) return;
       const { tabs: savedTabs, activeTabId: savedActiveId } = JSON.parse(saved);
       if (!Array.isArray(savedTabs) || savedTabs.length === 0) return;
-      const restored = [];
-      for (const t of savedTabs) {
-        if (t.type === 'note' && t.noteId != null) {
-          try {
-            const note = await invoke('get_note', { id: t.noteId });
-            restored.push({ ...t, label: note.title });
-          } catch { /* Note was deleted — drop it */ }
-        } else if (t.type === 'graph') {
-          restored.push(t);
-        }
-        // Chat tabs are not restored (no persistent content).
-      }
-      if (restored.length === 0) return;
-      tabs = restored;
-      const target = restored.find(t => t.id === savedActiveId) ?? restored[restored.length - 1];
-      activeTabId = target.id;
-      if (target.type === 'note' && target.noteId != null) {
-        const note = await invoke('get_note', { id: target.noteId });
-        openNote(note);
+
+      // Fetch all tab notes in parallel instead of sequentially.
+      const results = await Promise.all(
+        savedTabs.map(async t => {
+          if (t.type === 'note' && t.noteId != null) {
+            try {
+              const note = await invoke('get_note', { id: t.noteId });
+              return { tab: { ...t, label: note.title }, note };
+            } catch { return null; /* Note was deleted — drop it */ }
+          } else if (t.type === 'graph') {
+            return { tab: t, note: null };
+          }
+          // Chat tabs are not restored (no persistent content).
+          return null;
+        })
+      );
+
+      const valid = results.filter(Boolean);
+      if (valid.length === 0) return;
+      tabs = valid.map(r => r.tab);
+      const target = valid.find(r => r.tab.id === savedActiveId) ?? valid[valid.length - 1];
+      activeTabId = target.tab.id;
+      // Reuse the already-fetched note — no second invoke needed.
+      if (target.tab.type === 'note' && target.note) {
+        openNote(target.note);
       }
     } catch { /* Malformed localStorage data — start fresh */ }
   }
@@ -2117,7 +2132,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           <Kanban folderId={activeTab.folderId} onOpenNote={(id) => openNoteById(id)} />
         </div>
       {:else if activeTab?.type === 'chat'}
-        <Chat activeNote={null} pendingInsert={null} keepInMemory={keepModelInMemory} {llmEnabled} onClose={() => closeTab(activeTabId)} />
+        <Chat activeNote={null} pendingInsert={null} keepInMemory={keepModelInMemory} {llmEnabled} onClose={() => closeTab(activeTabId)} onContextMenu={(x, y, items) => (ctxMenu = { x, y, items })} onInsertIntoNote={null} />
       {:else if activeNote}
       <div class="editor-toolbar">
         <input
@@ -2220,7 +2235,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   {#if chatOpen && activeTab?.type !== 'chat'}
     <button class="panel-divider" aria-label="Resize chat panel" class:dragging={activeDrag?.panel === 'chat'} onmousedown={(e) => startDrag('chat', e)}></button>
-    <Chat {activeNote} pendingInsert={chatInsert} keepInMemory={keepModelInMemory} {llmEnabled} onClose={() => (chatOpen = false)} />
+    <Chat {activeNote} pendingInsert={chatInsert} keepInMemory={keepModelInMemory} {llmEnabled} onClose={() => (chatOpen = false)} onContextMenu={(x, y, items) => (ctxMenu = { x, y, items })} onInsertIntoNote={activeNote ? insertIntoActiveNote : null} />
   {/if}
 </div>
 

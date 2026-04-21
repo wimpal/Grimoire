@@ -20,7 +20,9 @@
         "fullscreen": false,
         "decorations": false,
         "center": true,
-        "dragDropEnabled": false
+        "dragDropEnabled": false,
+        "backgroundColor": "#fdfaf9",
+        "visible": false
       }
     ],
     "security": {

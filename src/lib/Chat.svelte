@@ -27,7 +27,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   // pendingInsert: { text: string, seq: number } — injected quote from the editor keybind.
   // keepInMemory: when true, keep_alive: -1 is sent so Ollama never unloads the model.
   // llmEnabled: false disables the chat UI and shows a hardware warning banner.
-  let { activeNote = null, pendingInsert = null, keepInMemory = false, llmEnabled = true, onClose = null } = $props();
+  let { activeNote = null, pendingInsert = null, keepInMemory = false, llmEnabled = true, onClose = null, onContextMenu = null, onInsertIntoNote = null } = $props();
 
   // ── State ──────────────────────────────────────────────────────────────────
 
@@ -78,6 +78,84 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   // ── Actions ────────────────────────────────────────────────────────────────
 
+  // Builds the system prompt, pushes a placeholder assistant message, and
+  // streams the response. `history` must be the full message list ending with
+  // a user message — it is never mutated.
+  async function streamResponse(history) {
+    let payload = history;
+    const systemParts = [];
+
+    // ── 1. Active note ───────────────────────────────────────────────────────
+    if (activeNote) {
+      systemParts.push(
+        `## Note the user currently has open\n### ${activeNote.title}\n${activeNote.content}`
+      );
+    }
+
+    // ── 2. RAG context ───────────────────────────────────────────────────────
+    // Always search even when a note is open — the question may be relevant
+    // to other notes beyond the one currently being edited.
+    if (useNotes) {
+      // Use the current message plus the previous user turn for the RAG query.
+      const recentUserMessages = history
+        .filter(m => m.role === 'user')
+        .slice(-2)
+        .map(m => m.content)
+        .join(' ');
+      let matches = [];
+      try {
+        matches = await invoke('search_notes', { query: recentUserMessages });
+      } catch (e) {
+        notesError = `Note search failed: ${e}`;
+      }
+      if (matches.length > 0) {
+        const byTitle = {};
+        for (const m of matches) {
+          if (!byTitle[m.title]) byTitle[m.title] = [];
+          byTitle[m.title].push(...m.excerpts);
+        }
+        sourcesUsed = Object.keys(byTitle);
+        const context = Object.entries(byTitle)
+          .map(([title, excerpts]) => `### ${title}\n${excerpts.join('\n')}`)
+          .join('\n\n---\n\n');
+        systemParts.push(`## Related notes\n${context}`);
+      }
+    }
+
+    // ── Assemble system message ──────────────────────────────────────────────
+    if (systemParts.length > 0) {
+      const systemMsg = {
+        role: 'system',
+        content:
+          `You are a personal knowledge assistant for the user.\n\n` +
+          systemParts.join('\n\n---\n\n') +
+          `\n\nIMPORTANT RULES:\n` +
+          `1. Read every note section above carefully before answering.\n` +
+          `2. If ANY note contains information that answers the question — even a single sentence — you MUST report it. Do NOT say the user hasn't mentioned something if it appears above.\n` +
+          `3. Quote or paraphrase the user's own words when reporting what they've written.\n` +
+          `4. Only say the notes don't contain something if you have checked every section and found nothing relevant.`,
+      };
+      payload = [systemMsg, ...history];
+    }
+
+    // Push a placeholder assistant message filled in token by token.
+    messages = [...history, { role: 'assistant', content: '' }];
+
+    const unlisten = await listen('chat:token', (event) => {
+      messages = messages.map((m, i) =>
+        i === messages.length - 1
+          ? { ...m, content: m.content + event.payload }
+          : m
+      );
+    });
+
+    try {
+      await invoke('chat', { model, messages: payload, keepInMemory });
+    } finally {
+      unlisten();
+    }
+  }
+
   async function send() {
     const text = input.trim();
     if (!text || isLoading) return;
@@ -92,94 +170,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     notesError = '';
 
     try {
-      // Build a system message from two optional sources:
-      //   1. The note the user currently has open (always injected if present).
-      //   2. RAG search results from the vector index (injected when useNotes is on).
-      // The system message is never added to the visible messages array — it's
-      // injected per-send so it doesn't grow the visible history.
-      let payload = updated;
-      const systemParts = [];
-
-      // ── 1. Active note ─────────────────────────────────────────────────────
-      if (activeNote) {
-        systemParts.push(
-          `## Note the user currently has open\n### ${activeNote.title}\n${activeNote.content}`
-        );
-      }
-
-      // ── 2. RAG context ─────────────────────────────────────────────────────
-      // Always search even when a note is open — the question may be relevant
-      // to other notes beyond the one currently being edited.
-      if (useNotes) {
-        // Use the current message plus the previous user turn for the RAG query.
-        // This gives short follow-ups like "and what about cows?" enough context
-        // to find the right note, without diluting the signal when the user
-        // switches topics (e.g. "and ducks?" after discussing horses and cows).
-        const recentUserMessages = updated
-          .filter(m => m.role === 'user')
-          .slice(-2)
-          .map(m => m.content)
-          .join(' ');
-        let matches = [];
-        try {
-          matches = await invoke('search_notes', { query: recentUserMessages });
-        } catch (e) {
-          // Surface the error so the user knows RAG isn't working rather than
-          // silently falling back to the model's generic training data.
-          notesError = `Note search failed: ${e}`;
-        }
-        if (matches.length > 0) {
-          // Group chunks by note title. A single note may contribute multiple
-          // matching chunks (e.g. two sentences from different parts of the note)
-          // — all of them are passed so the model can see every relevant excerpt.
-          const byTitle = {};
-          for (const m of matches) {
-            if (!byTitle[m.title]) byTitle[m.title] = [];
-            byTitle[m.title].push(...m.excerpts);
-          }
-          sourcesUsed = Object.keys(byTitle);
-          const context = Object.entries(byTitle)
-            .map(([title, excerpts]) => `### ${title}\n${excerpts.join('\n')}`)
-            .join('\n\n---\n\n');
-          systemParts.push(`## Related notes\n${context}`);
-        }
-      }
-
-      // ── Assemble system message ────────────────────────────────────────────
-      if (systemParts.length > 0) {
-        const systemMsg = {
-          role: 'system',
-          content:
-            `You are a personal knowledge assistant for the user.\n\n` +
-            systemParts.join('\n\n---\n\n') +
-            `\n\nIMPORTANT RULES:\n` +
-            `1. Read every note section above carefully before answering.\n` +
-            `2. If ANY note contains information that answers the question — even a single sentence — you MUST report it. Do NOT say the user hasn't mentioned something if it appears above.\n` +
-            `3. Quote or paraphrase the user's own words when reporting what they've written.\n` +
-            `4. Only say the notes don't contain something if you have checked every section and found nothing relevant.`,
-        };
-        payload = [systemMsg, ...updated];
-      }
-
-      // Push a placeholder assistant message that will be filled in token by token.
-      messages = [...messages, { role: 'assistant', content: '' }];
-
-      // Listen for streaming tokens from the backend. Each event appends to the
-      // last message (the placeholder we just pushed).
-      const unlisten = await listen('chat:token', (event) => {
-        messages = messages.map((m, i) =>
-          i === messages.length - 1
-            ? { ...m, content: m.content + event.payload }
-            : m
-        );
-      });
-
-      try {
-        // invoke resolves when the stream ends. Return type is now void.
-        await invoke('chat', { model, messages: payload, keepInMemory });
-      } finally {
-        unlisten();
-      }
+      await streamResponse(updated);
     } catch (e) {
       // Remove the empty placeholder if the request failed before any tokens arrived.
       if (messages.length > 0 && messages[messages.length - 1].role === 'assistant'
@@ -190,6 +181,76 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     } finally {
       isLoading = false;
     }
+  }
+
+  function deleteMessage(index) {
+    if (isLoading) return;
+    messages = messages.filter((_, i) => i !== index);
+  }
+
+  async function regenerate() {
+    if (isLoading) return;
+    // Strip the last assistant message so we end on a user message.
+    const history = messages[messages.length - 1]?.role === 'assistant'
+      ? messages.slice(0, -1)
+      : messages;
+    if (history.length === 0 || history[history.length - 1]?.role !== 'user') return;
+
+    isLoading = true;
+    error = '';
+    sourcesUsed = [];
+    notesError = '';
+
+    try {
+      await streamResponse(history);
+    } catch (e) {
+      if (messages.length > 0 && messages[messages.length - 1].role === 'assistant'
+          && messages[messages.length - 1].content === '') {
+        messages = messages.slice(0, -1);
+      }
+      error = String(e);
+    } finally {
+      isLoading = false;
+    }
+  }
+
+  // ── Context menu ────────────────────────────────────────────────────────────
+
+  function handleMessageContextMenu(e, msg, i) {
+    e.preventDefault();
+    const isLastAssistant = i === messages.length - 1 && msg.role === 'assistant';
+
+    const items = [
+      {
+        label: 'Copy',
+        action: () => navigator.clipboard.writeText(msg.content),
+      },
+      {
+        label: 'Copy as quote',
+        action: () => navigator.clipboard.writeText(`"${msg.content}"`),
+      },
+      ...(onInsertIntoNote ? [
+        { divider: true },
+        {
+          label: 'Insert into note',
+          action: () => onInsertIntoNote(msg.content),
+        },
+      ] : []),
+      { divider: true },
+      ...(isLastAssistant ? [{
+        label: 'Regenerate',
+        disabled: isLoading,
+        action: regenerate,
+      }] : []),
+      {
+        label: 'Delete',
+        danger: true,
+        disabled: isLoading,
+        action: () => deleteMessage(i),
+      },
+    ];
+
+    onContextMenu?.(e.clientX, e.clientY, items);
   }
 
   // ── Debug search ───────────────────────────────────────────────────────────
@@ -248,7 +309,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   <div class="chat-messages" role="log" aria-live="polite" aria-atomic="false" bind:this={messagesEl}>
     {#each messages as msg, i (i)}
       {#if msg.role !== 'assistant' || msg.content !== ''}
-        <div class="chat-message {msg.role}">
+        <div class="chat-message {msg.role}" role="listitem" oncontextmenu={(e) => handleMessageContextMenu(e, msg, i)}>
           <p>{msg.content}</p>
         </div>
       {/if}
@@ -313,7 +374,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       onkeydown={handleKeydown}
       placeholder="Message… (Enter to send, Shift+Enter for newline)"
       aria-label="Message"
-      rows="3"
+      rows="6"
       disabled={isLoading || !llmEnabled}
     ></textarea>
     <button onclick={send} disabled={isLoading || !input.trim() || !llmEnabled} aria-busy={isLoading}>Send</button>
