@@ -76,6 +76,32 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   // Chat panel
   let chatOpen = $state(false);
 
+  // Focus / distraction-free mode
+  let focusMode = $state(false);
+  // Snapshot of panel visibility before entering focus, restored on exit.
+  let savedLayout = null;
+
+  function toggleFocusMode() {
+    if (focusMode) {
+      // Restore saved layout
+      if (savedLayout) {
+        foldersOpen = savedLayout.foldersOpen;
+        notesOpen   = savedLayout.notesOpen;
+        savedLayout = null;
+      }
+      focusMode = false;
+    } else {
+      savedLayout = { foldersOpen, notesOpen };
+      foldersOpen = false;
+      notesOpen   = false;
+      focusMode   = true;
+    }
+  }
+
+  $effect(() => {
+    document.body.classList.toggle('focus-mode', focusMode);
+  });
+
   // When set, Chat.svelte will inject this text as a blockquote into its input.
   // Uses a seq counter so the same text can be injected multiple times.
   let chatInsert = $state(null); // { text: string, seq: number } | null
@@ -486,6 +512,12 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   // Divider columns (5px) sit between each panel pair; they collapse to 0px when the
   // adjacent panel is closed so the collapsed strip has no visible gap beside it.
   let gridCols = $derived.by(() => {
+    if (focusMode) {
+      return [
+        '1fr',
+        ...(chatOpen ? ['5px', `${chatWidth}px`] : []),
+      ].join(' ');
+    }
     return [
       foldersOpen ? `${foldersWidth}px` : '28px',
       foldersOpen ? '5px' : '0px',
@@ -1390,6 +1422,20 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       e.preventDefault();
       sendSelectionToChat();
     }
+    if (e.key === 'F11' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      toggleFocusMode();
+    }
+    if (e.key === 'Escape' && focusMode) {
+      // Only exit focus mode if no modal/overlay is open
+      const noModal = !settingsOpen && !searchOpen && !quickSwitcherOpen
+        && !templateModalOpen && !noteDeletePending && !folderDeletePending
+        && !vaultPwModal && !folderPwModal && !folderUnlockTarget;
+      if (noModal) {
+        e.preventDefault();
+        toggleFocusMode();
+      }
+    }
   }
 
   async function seedNotes() {
@@ -1743,6 +1789,29 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   />
 
   <div class="titlebar-right">
+    <button
+      class="titlebar-btn"
+      class:titlebar-btn-active={focusMode}
+      onclick={toggleFocusMode}
+      title="Focus mode (F11)"
+    >
+      <!-- Compress icon when in focus mode, expand icon when normal -->
+      {#if focusMode}
+        <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="14,6 14,1 9,1"/>
+          <polyline points="1,9 1,14 6,14"/>
+          <line x1="14" y1="1" x2="9" y2="6"/>
+          <line x1="1" y1="14" x2="6" y2="9"/>
+        </svg>
+      {:else}
+        <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="1,6 1,1 6,1"/>
+          <polyline points="9,14 14,14 14,9"/>
+          <line x1="1" y1="1" x2="6" y2="6"/>
+          <line x1="14" y1="14" x2="9" y2="9"/>
+        </svg>
+      {/if}
+    </button>
     <button
       class="titlebar-btn"
       class:titlebar-btn-active={chatOpen}
@@ -2254,7 +2323,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   </main>
 
   {#if chatOpen && activeTab?.type !== 'chat'}
-    <button class="panel-divider" aria-label="Resize chat panel" class:dragging={activeDrag?.panel === 'chat'} onmousedown={(e) => startDrag('chat', e)}></button>
+    <button class="panel-divider chat-divider" aria-label="Resize chat panel" class:dragging={activeDrag?.panel === 'chat'} onmousedown={(e) => startDrag('chat', e)}></button>
     <Chat {activeNote} pendingInsert={chatInsert} keepInMemory={keepModelInMemory} {llmEnabled} onClose={() => (chatOpen = false)} onContextMenu={(x, y, items) => (ctxMenu = { x, y, items })} onInsertIntoNote={activeNote ? insertIntoActiveNote : null} {activeView} {activeViewFolderId} {activeViewLabel} {activeViewFilters} />
   {/if}
 </div>

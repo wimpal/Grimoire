@@ -8,6 +8,7 @@ export const FEATURE_GUIDE = `## Grimoire Feature Guide
 - Ctrl+Tab / Ctrl+Shift+Tab: Cycle tabs forward/backward
 - Ctrl+W: Close active tab
 - Ctrl+S: Save current note
+- F11: Toggle focus / distraction-free mode (hides all panels)
 - Ctrl+Shift+L: Lock vault
 - Ctrl+Shift+Enter: Send selected text to chat
 - Delete: Delete active note
