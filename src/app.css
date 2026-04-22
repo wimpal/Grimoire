@@ -585,6 +585,52 @@ h2 {
   color: var(--accent);
 }
 
+.kanban-card-top {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.kanban-card-top .kanban-card-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.kanban-card-delete-btn {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: 3px;
+  color: var(--text);
+  opacity: 0;
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  padding: 0;
+  transition: opacity 0.1s, background 0.1s, color 0.1s;
+}
+
+.kanban-card:hover .kanban-card-delete-btn {
+  opacity: 0.4;
+}
+
+.kanban-card-delete-btn:hover {
+  opacity: 1 !important;
+  background: var(--danger);
+  color: #fff;
+}
+
+.kanban-card-delete-btn:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .kanban-card-props {
   margin: 6px 0 0 0;
   padding: 0;
@@ -710,6 +756,23 @@ h2 {
 .kanban-add-btn:disabled {
   cursor: wait;
   opacity: 0.35;
+}
+
+.kanban-inline-input {
+  margin-top: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  background: var(--bg2);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--text-h);
+  font: 13px var(--sans);
+  outline: none;
+}
+
+.kanban-inline-input::placeholder {
+  color: var(--text);
+  opacity: 0.4;
 }
 
 .tab-new {
@@ -1536,6 +1599,15 @@ li:hover .folder-count {
 .notes-toggle input[type="checkbox"] {
   accent-color: var(--accent);
   cursor: pointer;
+}
+
+.notes-toggle.disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.notes-toggle.disabled input[type="checkbox"] {
+  cursor: not-allowed;
 }
 
 /* ── Seed button (dev only, shown when note list is empty) ────────── */

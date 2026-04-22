@@ -26,7 +26,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
    */
   import { invoke } from '@tauri-apps/api/core';
 
-  let { folderId, onOpenNote = () => {} } = $props();
+  let { folderId, onOpenNote = () => {}, onFiltersChange = () => {} } = $props();
 
   let defs = $state([]);
   let rows = $state([]);
@@ -76,9 +76,11 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         filters = {};
         pending = {};
       }
+      onFiltersChange(filters);
     } catch {
       defs = [];
       rows = [];
+      onFiltersChange({});
     } finally {
       loading = false;
     }
@@ -197,20 +199,23 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     delete p[defId];
     const f = { ...filters };
     delete f[defId];
-    pending = p;
     filters = f;
+    pending = p;
     localStorage.setItem(`db-filters-${folderId}`, JSON.stringify(f));
+    onFiltersChange(f);
   }
 
   function clearFilters() {
     filters = {};
     pending = {};
     localStorage.removeItem(`db-filters-${folderId}`);
+    onFiltersChange({});
   }
 
   function applyPending() {
     filters = { ...pending };
     localStorage.setItem(`db-filters-${folderId}`, JSON.stringify(filters));
+    onFiltersChange(filters);
   }
 
   function onOpChange(defId, op, def) {

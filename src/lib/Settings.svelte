@@ -116,6 +116,49 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   let embeddingModel = $state('nomic-embed-text');
   let logFileAccess  = $state(true);
 
+  // ── Inference params ──────────────────────────────────────────────────────
+
+  let chatTemperature   = $state(0.8);
+  let chatTopP          = $state(0.9);
+  let chatTopK          = $state(40);
+  let chatRepeatPenalty = $state(1.1);
+  let chatNumCtx        = $state(8192);
+  let verbosity         = $state('concise');
+
+  async function loadSetting(key, fallback, setter) {
+    try {
+      const val = await invoke('get_setting', { key });
+      if (val !== '') setter(val);
+    } catch { /* use fallback */ }
+  }
+
+  // Load all settings from SQLite on mount.
+  $effect(() => {
+    loadSetting('chat_model', 'llama3.2', v => { chatModel = v; });
+    loadSetting('embedding_model', 'nomic-embed-text', v => { embeddingModel = v; });
+    loadSetting('chat_temperature', '0.8',   v => { chatTemperature = parseFloat(v); });
+    loadSetting('chat_top_p',       '0.9',   v => { chatTopP = parseFloat(v); });
+    loadSetting('chat_top_k',       '40',    v => { chatTopK = parseInt(v, 10); });
+    loadSetting('chat_repeat_penalty', '1.1', v => { chatRepeatPenalty = parseFloat(v); });
+    loadSetting('chat_num_ctx',     '8192',  v => { chatNumCtx = parseInt(v, 10); });
+    loadSetting('chat_verbosity',   'concise', v => { verbosity = v; });
+  });
+
+  // Persist on change.
+  function persist(key) {
+    return (val) => {
+      invoke('set_setting', { key, value: String(val) }).catch(() => {});
+    };
+  }
+  $effect(() => { persist('chat_model')(chatModel); });
+  $effect(() => { persist('embedding_model')(embeddingModel); });
+  $effect(() => { persist('chat_temperature')(chatTemperature); });
+  $effect(() => { persist('chat_top_p')(chatTopP); });
+  $effect(() => { persist('chat_top_k')(chatTopK); });
+  $effect(() => { persist('chat_repeat_penalty')(chatRepeatPenalty); });
+  $effect(() => { persist('chat_num_ctx')(chatNumCtx); });
+  $effect(() => { persist('chat_verbosity')(verbosity); });
+
   // ── Export state ──────────────────────────────────────────────────────────
 
   let exportStatus = $state(''); // '' | 'running' | 'done:N' | 'error:msg'
@@ -203,6 +246,60 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
             <option value="nomic-embed-text">nomic-embed-text (default, ~270 MB)</option>
             <option value="mxbai-embed-large">mxbai-embed-large · higher quality</option>
           </select>
+        </div>
+
+        <h4 class="settings-subsection">Inference parameters</h4>
+
+        <div class="setting-row">
+          <div class="setting-label">
+            <span class="setting-name">Temperature</span>
+            <span class="setting-desc">Controls randomness. Higher values produce more creative, less predictable responses.</span>
+          </div>
+          <input type="number" class="setting-num" bind:value={chatTemperature} min="0" max="2" step="0.05" />
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-label">
+            <span class="setting-name">Verbosity</span>
+            <span class="setting-desc">Controls how detailed the model's responses are.</span>
+          </div>
+          <select bind:value={verbosity}>
+            <option value="concise">Concise (default)</option>
+            <option value="thorough">Thorough</option>
+            <option value="caveman">Caveman</option>
+          </select>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-label">
+            <span class="setting-name">Top P</span>
+            <span class="setting-desc">Nucleus sampling threshold. Lower values make output more focused.</span>
+          </div>
+          <input type="number" class="setting-num" bind:value={chatTopP} min="0" max="1" step="0.05" />
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-label">
+            <span class="setting-name">Top K</span>
+            <span class="setting-desc">Limits the next token selection to the K most likely candidates. 0 disables it.</span>
+          </div>
+          <input type="number" class="setting-num" bind:value={chatTopK} min="0" max="200" step="1" />
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-label">
+            <span class="setting-name">Repeat penalty</span>
+            <span class="setting-desc">Penalises tokens that have already appeared. Higher values reduce repetition.</span>
+          </div>
+          <input type="number" class="setting-num" bind:value={chatRepeatPenalty} min="0.5" max="2" step="0.05" />
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-label">
+            <span class="setting-name">Context window</span>
+            <span class="setting-desc">Maximum tokens the model can see at once. Higher values use more RAM.</span>
+          </div>
+          <input type="number" class="setting-num" bind:value={chatNumCtx} min="512" max="131072" step="512" />
         </div>
 
       {:else if activeSection === 'hardware'}
@@ -681,6 +778,33 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   .setting-row select:focus {
     outline: none;
     border-color: var(--accent);
+  }
+
+  .setting-row .setting-num {
+    flex-shrink: 0;
+    width: 100px;
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--bg);
+    color: var(--text-h);
+    font: 13px var(--sans);
+    text-align: right;
+  }
+
+  .setting-row .setting-num:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+
+  .settings-subsection {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text);
+    margin: 20px 0 0;
+    padding: 0;
   }
 
   /* ── Accent swatches ─────────────────────────────────────────────── */

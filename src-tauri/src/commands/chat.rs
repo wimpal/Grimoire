@@ -45,18 +45,30 @@ struct OllamaChatRequest {
 /// Runtime options forwarded to Ollama on every request.
 /// `num_thread` caps the number of CPU threads Ollama uses for inference,
 /// leaving headroom for the OS and other running applications.
+/// The remaining fields are user-configurable inference parameters.
 #[derive(Serialize)]
 struct OllamaOptions {
     num_thread: usize,
     temperature: f32,
+    top_p: f32,
+    top_k: i32,
+    repeat_penalty: f32,
+    num_ctx: i32,
 }
 
 impl OllamaOptions {
-    fn balanced() -> Self {
+    fn new(temperature: f32, top_p: f32, top_k: i32, repeat_penalty: f32, num_ctx: i32) -> Self {
         let total = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        Self { num_thread: (total / 2).max(1), temperature: 0.8 }
+        Self {
+            num_thread: (total / 2).max(1),
+            temperature,
+            top_p,
+            top_k,
+            repeat_penalty,
+            num_ctx,
+        }
     }
 }
 
@@ -73,12 +85,17 @@ struct OllamaStreamChunk {
 /// arrive from Ollama. The command resolves once the stream is complete.
 /// `keep_in_memory`: when true, keep_alive is set to -1 so the model is
 /// never unloaded; when false the Ollama default (300s) is used.
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn chat(
     app: tauri::AppHandle,
     model: String,
     messages: Vec<ChatMessage>,
     keep_in_memory: bool,
+    temperature: f32,
+    top_p: f32,
+    top_k: i32,
+    repeat_penalty: f32,
+    num_ctx: i32,
 ) -> Result<(), String> {
     use tauri::Emitter;
 
@@ -89,7 +106,7 @@ pub async fn chat(
         messages,
         stream: true,
         keep_alive: if keep_in_memory { -1 } else { 300 },
-        options: OllamaOptions::balanced(),
+        options: OllamaOptions::new(temperature, top_p, top_k, repeat_penalty, num_ctx),
     };
 
     let response = client

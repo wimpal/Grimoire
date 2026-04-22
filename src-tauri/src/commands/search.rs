@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026 Wim Palland
+// Copyright (C) 2026 Wim Palland
 //
 // This file is part of Grimoire.
 //
@@ -241,7 +241,13 @@ pub async fn combined_search(
     let fts_fut = fts_search_inner(pool.inner(), &keys, &query, limit * 2);
 
     let semantic_fut = async {
-        match crate::commands::rag::embed_query(&query).await {
+        let model = sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = 'embedding_model' LIMIT 1")
+            .fetch_optional(pool.inner())
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "nomic-embed-text".to_string());
+        match crate::commands::rag::embed_query(&query, &model).await {
             Ok(vec) => crate::vector::search(&vdb.0, vec, limit * 2).await.ok(),
             Err(_) => None,
         }

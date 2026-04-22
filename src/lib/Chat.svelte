@@ -19,6 +19,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { untrack, tick } from 'svelte';
+  import { FEATURE_GUIDE } from './utils/featureGuide.js';
 
   // ── Props ──────────────────────────────────────────────────────────────────
 
@@ -27,7 +28,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   // pendingInsert: { text: string, seq: number } — injected quote from the editor keybind.
   // keepInMemory: when true, keep_alive: -1 is sent so Ollama never unloads the model.
   // llmEnabled: false disables the chat UI and shows a hardware warning banner.
-  let { activeNote = null, pendingInsert = null, keepInMemory = false, llmEnabled = true, onClose = null, onContextMenu = null, onInsertIntoNote = null } = $props();
+  let { activeNote = null, pendingInsert = null, keepInMemory = false, llmEnabled = true, onClose = null, onContextMenu = null, onInsertIntoNote = null, activeView = null, activeViewFolderId = null, activeViewLabel = '', activeViewFilters = {} } = $props();
 
   // ── State ──────────────────────────────────────────────────────────────────
 
@@ -38,6 +39,35 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   let isLoading = $state(false);
   let error = $state('');
   let useNotes = $state(true);
+  let useViewContext = $state(true);
+  let useFeatureGuide = $state(true);
+
+  $effect(() => {
+    localStorage.setItem('grimoire:chat:useViewContext', JSON.stringify(useViewContext));
+  });
+  $effect(() => {
+    const saved = localStorage.getItem('grimoire:chat:useViewContext');
+    if (saved !== null) useViewContext = JSON.parse(saved);
+  });
+  $effect(() => {
+    localStorage.setItem('grimoire:chat:useFeatureGuide', JSON.stringify(useFeatureGuide));
+  });
+  $effect(() => {
+    const saved = localStorage.getItem('grimoire:chat:useFeatureGuide');
+    if (saved !== null) useFeatureGuide = JSON.parse(saved);
+  });
+
+  // Load chat model from SQLite on mount.
+  $effect(() => {
+    invoke('get_setting', { key: 'chat_model' })
+      .then(val => { if (val !== '') model = val; })
+      .catch(() => {});
+  });
+
+  // Persist chat model to SQLite when changed.
+  $effect(() => {
+    invoke('set_setting', { key: 'chat_model', value: model }).catch(() => {});
+  });
 
   // Reference to the chat textarea so we can focus it after injection.
   let inputEl = $state(null);
@@ -78,10 +108,82 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   // ── Actions ────────────────────────────────────────────────────────────────
 
+  // ── Filter helper (mirrored from DatabaseView) ──────────────────────────────
+
+  function applyFilters(rows, filters, defs) {
+    const active = Object.entries(filters).filter(([, f]) => f && !isFilterEmpty(f));
+    if (active.length === 0) return rows;
+    return rows.filter(note => {
+      return active.every(([defId, f]) => {
+        const def = defs.find(d => d.id === Number(defId));
+        if (!def) return true;
+        const prop = note.properties.find(p => p.def_id === Number(defId));
+        const val = prop?.value ?? null;
+        if (def.type === 'text') {
+          if (f.op === 'is empty')     return val === null || val === '';
+          if (f.op === 'is not empty') return val !== null && val !== '';
+          if (val === null) return false;
+          if (f.op === 'contains') return val.toLowerCase().includes(f.value.toLowerCase());
+          if (f.op === 'equals')   return val.toLowerCase() === f.value.toLowerCase();
+        }
+        if (def.type === 'number') {
+          if (val === null || val === '') return false;
+          const n = parseFloat(val);
+          const v = parseFloat(f.value);
+          if (isNaN(n) || isNaN(v)) return false;
+          if (f.op === '=')  return n === v;
+          if (f.op === '≠')  return n !== v;
+          if (f.op === '>')  return n > v;
+          if (f.op === '<')  return n < v;
+          if (f.op === '≥')  return n >= v;
+          if (f.op === '≤')  return n <= v;
+        }
+        if (def.type === 'date') {
+          if (val === null || val === '') return false;
+          if (f.op === 'on')     return val === f.value;
+          if (f.op === 'before') return val < f.value;
+          if (f.op === 'after')  return val > f.value;
+          if (f.op === 'between') {
+            const [from, to] = Array.isArray(f.value) ? f.value : ['', ''];
+            return val >= from && val <= to;
+          }
+        }
+        if (def.type === 'boolean') {
+          const b = val === 'true';
+          if (f.op === 'is true')  return b === true;
+          if (f.op === 'is false') return b === false;
+        }
+        if (def.type === 'select') {
+          const selected = Array.isArray(f.value) ? f.value : [];
+          if (selected.length === 0) return true;
+          if (f.op === 'any of') return selected.includes(val ?? '');
+          if (f.op === 'none of') return !selected.includes(val ?? '');
+        }
+        return true;
+      });
+    });
+  }
+
+  function isFilterEmpty(f) {
+    if (!f || !f.op) return true;
+    const { op, value } = f;
+    if (op === 'is empty' || op === 'is not empty' || op === 'is true' || op === 'is false') return false;
+    if (Array.isArray(value)) return value.every(v => v === '');
+    return value === '';
+  }
+
   // Builds the system prompt, pushes a placeholder assistant message, and
   // streams the response. `history` must be the full message list ending with
   // a user message — it is never mutated.
-  async function streamResponse(history) {
+  async function streamResponse(history, params = {}) {
+    const {
+      temperature = 0.8,
+      top_p = 0.9,
+      top_k = 40,
+      repeat_penalty = 1.1,
+      num_ctx = 8192,
+      verbosity = 'concise',
+    } = params;
     let payload = history;
     const systemParts = [];
 
@@ -90,6 +192,106 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       systemParts.push(
         `## Note the user currently has open\n### ${activeNote.title}\n${activeNote.content}`
       );
+    }
+
+    // ── 1b. Board/table context ──────────────────────────────────────────────
+    if (useViewContext && activeView && activeViewFolderId != null) {
+      try {
+        const [defs, notes] = await Promise.all([
+          invoke('get_property_defs', { folderId: activeViewFolderId }),
+          invoke('list_notes_with_properties', { folderId: activeViewFolderId }),
+        ]);
+
+        const contextLines = [`## ${activeViewLabel}`];
+
+        // Property schema
+        contextLines.push('Property definitions:');
+        for (const def of defs) {
+          let desc = `${def.name} (${def.type})`;
+          if (def.type === 'select' && def.options) {
+            try {
+              const opts = JSON.parse(def.options).join(', ');
+              desc += ` — options: ${opts}`;
+            } catch {}
+          }
+          contextLines.push(`- ${desc}`);
+        }
+
+        // Apply table filters if any
+        let visibleNotes = notes;
+        if (activeView === 'database' && Object.keys(activeViewFilters).length > 0) {
+          visibleNotes = applyFilters(notes, activeViewFilters, defs);
+        }
+
+        const MAX_NOTES = 50;
+        let total = 0;
+
+        if (activeView === 'kanban') {
+          const selectDef = defs.find(d => d.type === 'select');
+          if (selectDef) {
+            let options = [];
+            try { options = JSON.parse(selectDef.options ?? '[]'); } catch { options = []; }
+            const groups = {};
+            for (const opt of options) groups[opt] = [];
+            groups['__unset__'] = [];
+
+            for (const note of visibleNotes) {
+              const prop = note.properties.find(p => p.def_id === selectDef.id);
+              const val = prop?.value?.trim() || '';
+              const key = val === '' ? '__unset__' : val;
+              if (!groups[key]) groups[key] = [];
+              groups[key].push(note);
+            }
+
+            for (const [colKey, colNotes] of Object.entries(groups)) {
+              if (total >= MAX_NOTES) break;
+              const label = colKey === '__unset__' ? 'Unset' : colKey;
+              const remaining = MAX_NOTES - total;
+              const shown = colNotes.slice(0, remaining);
+              contextLines.push(`\n### ${label} (${colNotes.length})`);
+              for (const note of shown) {
+                const props = note.properties
+                  .filter(p => p.value?.trim())
+                  .map(p => `${p.name}: ${p.value}`)
+                  .join(', ');
+                contextLines.push(`- ${note.title}${props ? ` [${props}]` : ''}`);
+              }
+              total += shown.length;
+            }
+            const hidden = notes.length - total;
+            if (hidden > 0) contextLines.push(`\n... and ${hidden} more cards not shown`);
+          }
+        } else if (activeView === 'database') {
+          for (const note of visibleNotes) {
+            if (total >= MAX_NOTES) {
+              contextLines.push(`\n... and ${visibleNotes.length - total} more rows not shown`);
+              break;
+            }
+            const props = note.properties
+              .filter(p => p.value?.trim())
+              .map(p => `${p.name}: ${p.value}`)
+              .join(', ');
+            contextLines.push(`- **${note.title}**${props ? ` — ${props}` : ''}`);
+            total++;
+          }
+        }
+
+        systemParts.push(contextLines.join('\n'));
+      } catch (e) {
+        // Silently fail — don't interrupt chat if context fetch fails
+      }
+    }
+
+    // ── 1c. Feature guide ───────────────────────────────────────────────────
+    if (useFeatureGuide) {
+      systemParts.push(FEATURE_GUIDE);
+    }
+
+    // ── 1d. Verbosity instruction ────────────────────────────────────────────
+    if (verbosity === 'thorough') {
+      systemParts.push('## Style instruction\nProvide thorough, detailed answers with full context. Do not skip nuance.');
+    } else if (verbosity === 'caveman') {
+      systemParts.push('## Style instruction\nUse short, blunt sentences. Cut every unnecessary word.');
     }
 
     // ── 2. RAG context ───────────────────────────────────────────────────────
@@ -116,9 +318,9 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         }
         sourcesUsed = Object.keys(byTitle);
         const context = Object.entries(byTitle)
-          .map(([title, excerpts]) => `### ${title}\n${excerpts.join('\n')}`)
-          .join('\n\n---\n\n');
-        systemParts.push(`## Related notes\n${context}`);
+          .map(([title, excerpts]) => `NOTE: "${title}"\nCONTENT:\n${excerpts.join('\n')}\nEND NOTE`)
+          .join('\n\n');
+        systemParts.push(`SEARCH RESULTS:\n${context}`);
       }
     }
 
@@ -127,13 +329,15 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       const systemMsg = {
         role: 'system',
         content:
-          `You are a personal knowledge assistant for the user.\n\n` +
-          systemParts.join('\n\n---\n\n') +
-          `\n\nIMPORTANT RULES:\n` +
-          `1. Read every note section above carefully before answering.\n` +
-          `2. If ANY note contains information that answers the question — even a single sentence — you MUST report it. Do NOT say the user hasn't mentioned something if it appears above.\n` +
-          `3. Quote or paraphrase the user's own words when reporting what they've written.\n` +
-          `4. Only say the notes don't contain something if you have checked every section and found nothing relevant.`,
+          `The user has asked a question. Below are search results from the user's personal notes.\n` +
+          `Each result is a note with its title and content. Read the content of each note carefully.\n\n` +
+          systemParts.join('\n\n') +
+          `\n\nINSTRUCTIONS:\n` +
+          `1. Answer the user's question using ONLY the information from the notes above.\n` +
+          `2. If a note contains information that answers the question, use that information in your answer.\n` +
+          `3. Do not say "I don't see any information" if the notes contain relevant information.\n` +
+          `4. Quote or paraphrase from the note content when possible.\n` +
+          `5. Ignore any formatting like brackets [[ ]] or asterisks **. Focus on the text.`,
       };
       payload = [systemMsg, ...history];
     }
@@ -150,7 +354,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     });
 
     try {
-      await invoke('chat', { model, messages: payload, keepInMemory });
+      await invoke('chat', { model, messages: payload, keepInMemory, temperature, topP: top_p, topK: top_k, repeatPenalty: repeat_penalty, numCtx: num_ctx });
     } finally {
       unlisten();
     }
@@ -169,8 +373,31 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     sourcesUsed = [];
     notesError = '';
 
+    // Load inference params from settings so changes take effect immediately.
+    let params = {};
     try {
-      await streamResponse(updated);
+      const [temperature, top_p, top_k, repeat_penalty, num_ctx, verbosity] = await Promise.all([
+        invoke('get_setting', { key: 'chat_temperature' }),
+        invoke('get_setting', { key: 'chat_top_p' }),
+        invoke('get_setting', { key: 'chat_top_k' }),
+        invoke('get_setting', { key: 'chat_repeat_penalty' }),
+        invoke('get_setting', { key: 'chat_num_ctx' }),
+        invoke('get_setting', { key: 'chat_verbosity' }),
+      ]);
+      params = {
+        temperature: temperature !== '' ? parseFloat(temperature) : 0.8,
+        top_p:       top_p !== ''       ? parseFloat(top_p)       : 0.9,
+        top_k:       top_k !== ''       ? parseInt(top_k, 10)     : 40,
+        repeat_penalty: repeat_penalty !== '' ? parseFloat(repeat_penalty) : 1.1,
+        num_ctx:     num_ctx !== ''     ? parseInt(num_ctx, 10)   : 8192,
+        verbosity:   verbosity !== ''   ? verbosity               : 'concise',
+      };
+    } catch {
+      params = {};
+    }
+
+    try {
+      await streamResponse(updated, params);
     } catch (e) {
       // Remove the empty placeholder if the request failed before any tokens arrived.
       if (messages.length > 0 && messages[messages.length - 1].role === 'assistant'
@@ -201,8 +428,31 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     sourcesUsed = [];
     notesError = '';
 
+    // Load inference params from settings (same as send()).
+    let params = {};
     try {
-      await streamResponse(history);
+      const [temperature, top_p, top_k, repeat_penalty, num_ctx, verbosity] = await Promise.all([
+        invoke('get_setting', { key: 'chat_temperature' }),
+        invoke('get_setting', { key: 'chat_top_p' }),
+        invoke('get_setting', { key: 'chat_top_k' }),
+        invoke('get_setting', { key: 'chat_repeat_penalty' }),
+        invoke('get_setting', { key: 'chat_num_ctx' }),
+        invoke('get_setting', { key: 'chat_verbosity' }),
+      ]);
+      params = {
+        temperature: temperature !== '' ? parseFloat(temperature) : 0.8,
+        top_p:       top_p !== ''       ? parseFloat(top_p)       : 0.9,
+        top_k:       top_k !== ''       ? parseInt(top_k, 10)     : 40,
+        repeat_penalty: repeat_penalty !== '' ? parseFloat(repeat_penalty) : 1.1,
+        num_ctx:     num_ctx !== ''     ? parseInt(num_ctx, 10)   : 8192,
+        verbosity:   verbosity !== ''   ? verbosity               : 'concise',
+      };
+    } catch {
+      params = {};
+    }
+
+    try {
+      await streamResponse(history, params);
     } catch (e) {
       if (messages.length > 0 && messages[messages.length - 1].role === 'assistant'
           && messages[messages.length - 1].content === '') {
@@ -300,6 +550,14 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     <label class="notes-toggle" title="Search your notes and inject the most relevant ones as context before each message (requires nomic-embed-text)">
       <input type="checkbox" bind:checked={useNotes} />
       Use notes
+    </label>
+    <label class="notes-toggle view-context-toggle" title="Include the current board or table view state as context for the LLM" class:disabled={!activeView}>
+      <input type="checkbox" bind:checked={useViewContext} disabled={!activeView} />
+      Use view
+    </label>
+    <label class="notes-toggle" title="Include a feature guide describing Grimoire keyboard shortcuts, view types, and commands">
+      <input type="checkbox" bind:checked={useFeatureGuide} />
+      Use guide
     </label>
     {#if onClose}
       <button class="chat-close-btn" onclick={onClose} aria-label="Close chat">✕</button>

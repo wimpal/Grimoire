@@ -25,6 +25,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
    */
   import { tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import ConfirmModal from './ConfirmModal.svelte';
 
   let { folderId, onOpenNote = () => {} } = $props();
 
@@ -318,24 +319,66 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     }
   }
 
-  // ── Create note in column ──────────────────────────────────────────────────
+  // ── Delete note ──────────────────────────────────────────────────────────
 
-  let creating = $state(null); // colKey currently being created in
+  let deletePending = $state(null); // { id, title }
 
-  async function createInColumn(colKey) {
-    if (creating) return;
-    creating = colKey;
+  async function confirmDeleteNote() {
+    const { id } = deletePending;
+    deletePending = null;
     try {
-      const note = await invoke('create_note', { title: 'Untitled', folderId });
+      await invoke('delete_note', { id });
+      invoke('remove_note_index', { noteId: id }).catch(() => {});
+      await refreshNotes();
+    } catch (e) {
+      errorMsg = String(e);
+    }
+  }
+
+  function cancelDelete() {
+    deletePending = null;
+  }
+
+  // ── Create note in column (inline) ────────────────────────────────────────
+
+  let creating = $state(null);   // colKey currently being created in
+  let creatingTitle = $state(''); // title typed in the inline input
+  let creatingInput = $state(null); // input element ref
+
+  function startCreating(colKey) {
+    creating = colKey;
+    creatingTitle = '';
+    tick().then(() => creatingInput?.focus());
+  }
+
+  function cancelCreating() {
+    creating = null;
+    creatingTitle = '';
+  }
+
+  async function submitCreating(colKey) {
+    const title = creatingTitle.trim();
+    if (!title) { cancelCreating(); return; }
+    creating = null;
+    creatingTitle = '';
+    try {
+      const note = await invoke('create_note', { title, folderId });
       if (colKey !== '__unset__' && groupByDefId) {
         await invoke('set_note_property', { noteId: note.id, defId: groupByDefId, value: colKey });
       }
       await refreshNotes();
-      onOpenNote(note.id);
     } catch (e) {
       errorMsg = String(e);
-    } finally {
-      creating = null;
+    }
+  }
+
+  function onInputKeydown(e, colKey) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submitCreating(colKey);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelCreating();
     }
   }
 </script>
@@ -407,7 +450,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
             ondragleave={(e) => onColDragLeave(e, col.key)}
             ondrop={(e) => onColDrop(e, col.key)}
           >
-            {#each col.notes as note (note.id)}
+              {#each col.notes as note (note.id)}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div
                 class="kanban-card"
@@ -421,12 +464,19 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
                 ondragleave={onCardDragLeave}
                 ondrop={(e) => onCardDrop(e, note.id, col.key)}
               >
-                <button
-                  class="kanban-card-title"
-                  aria-label="{note.title}{movingNoteId === note.id ? '. Moving. Press left or right to change column, Enter to confirm, Escape to cancel.' : '. Press M to move between columns.'}"
-                  onclick={() => onOpenNote(note.id)}
-                  onkeydown={(e) => handleCardKeydown(e, note, col)}
-                >{note.title}</button>
+                <div class="kanban-card-top">
+                  <button
+                    class="kanban-card-title"
+                    aria-label="{note.title}{movingNoteId === note.id ? '. Moving. Press left or right to change column, Enter to confirm, Escape to cancel.' : '. Press M to move between columns.'}"
+                    onclick={() => onOpenNote(note.id)}
+                    onkeydown={(e) => handleCardKeydown(e, note, col)}
+                  >{note.title}</button>
+                  <button
+                    class="kanban-card-delete-btn"
+                    aria-label="Delete {note.title}"
+                    onclick={() => deletePending = { id: note.id, title: note.title }}
+                  >✕</button>
+                </div>
                 {#if visibleDefIds.size > 0}
                   <dl class="kanban-card-props">
                     {#each note.properties.filter(p => visibleDefIds.has(p.def_id) && (p.value ?? '').trim() !== '') as prop}
@@ -442,11 +492,23 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
               <p class="kanban-col-empty">No notes</p>
             {/each}
 
-            <button
-              class="kanban-add-btn"
-              disabled={creating === col.key}
-              onclick={() => createInColumn(col.key)}
-            >{creating === col.key ? 'Creating…' : '+ New note'}</button>
+            {#if creating === col.key}
+              <input
+                class="kanban-inline-input"
+                type="text"
+                placeholder="Note title…"
+                aria-label="New note title"
+                bind:value={creatingTitle}
+                bind:this={creatingInput}
+                onkeydown={(e) => onInputKeydown(e, col.key)}
+                onblur={() => { if (creatingTitle.trim() === '') cancelCreating(); else submitCreating(col.key); }}
+              />
+            {:else}
+              <button
+                class="kanban-add-btn"
+                onclick={() => startCreating(col.key)}
+              >+ New</button>
+            {/if}
           </div>
         </div>
       {/each}
@@ -454,3 +516,13 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   {/if}
 
 </div>
+
+{#if deletePending}
+  <ConfirmModal
+    title="Delete note"
+    message={'Are you sure you want to delete "' + deletePending.title + '"? This cannot be undone.'}
+    confirmLabel="Delete"
+    onConfirm={confirmDeleteNote}
+    onCancel={cancelDelete}
+  />
+{/if}

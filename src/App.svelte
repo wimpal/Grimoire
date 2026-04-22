@@ -394,6 +394,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   let folderHasProperties = $state(false); // true when the selected folder has any property defs
   let noteProperties = $state([]); // properties for the active note (for RAG suffix)
   let propertiesReady = $state(true); // false while NoteProperties is fetching, to prevent layout shift
+  let activeViewFilters = $state({}); // current filters from DatabaseView, for LLM context
   // Tags shown in the sidebar: if searching, filter by prefix match;
   // otherwise show the top TAG_LIMIT by note count.
   let visibleTags = $derived(
@@ -410,6 +411,24 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     else if (noteSort === 'created') arr.sort((a, b) => b.created_at - a.created_at);
     else arr.sort((a, b) => b.updated_at - a.updated_at);
     return arr;
+  });
+
+  // Derived view state for LLM context injection.
+  let activeView = $derived(
+    activeTab?.type === 'kanban' ? 'kanban'
+    : tableViewOpen ? 'database'
+    : null
+  );
+  let activeViewFolderId = $derived(
+    activeView === 'kanban' ? activeTab.folderId
+    : activeView === 'database' ? selectedFolderId
+    : null
+  );
+  let activeViewLabel = $derived.by(() => {
+    if (!activeView || !activeViewFolderId) return '';
+    const folder = folders.find(f => f.id === activeViewFolderId);
+    const name = folder?.name ?? 'Unknown';
+    return activeView === 'kanban' ? `Kanban — ${name}` : `Table — ${name}`;
   });
 
   // Word count and estimated reading time for the active note.
@@ -2104,6 +2123,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           <DatabaseView
             folderId={selectedFolderId}
             onOpenNote={(id) => { tableViewOpen = false; openNoteById(id); }}
+            onFiltersChange={(f) => activeViewFilters = f}
           />
           {/key}
         </div>
@@ -2132,7 +2152,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           <Kanban folderId={activeTab.folderId} onOpenNote={(id) => openNoteById(id)} />
         </div>
       {:else if activeTab?.type === 'chat'}
-        <Chat activeNote={null} pendingInsert={null} keepInMemory={keepModelInMemory} {llmEnabled} onClose={() => closeTab(activeTabId)} onContextMenu={(x, y, items) => (ctxMenu = { x, y, items })} onInsertIntoNote={null} />
+        <Chat activeNote={null} pendingInsert={null} keepInMemory={keepModelInMemory} {llmEnabled} onClose={() => closeTab(activeTabId)} onContextMenu={(x, y, items) => (ctxMenu = { x, y, items })} onInsertIntoNote={null} {activeView} {activeViewFolderId} {activeViewLabel} {activeViewFilters} />
       {:else if activeNote}
       <div class="editor-toolbar">
         <input
@@ -2235,7 +2255,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   {#if chatOpen && activeTab?.type !== 'chat'}
     <button class="panel-divider" aria-label="Resize chat panel" class:dragging={activeDrag?.panel === 'chat'} onmousedown={(e) => startDrag('chat', e)}></button>
-    <Chat {activeNote} pendingInsert={chatInsert} keepInMemory={keepModelInMemory} {llmEnabled} onClose={() => (chatOpen = false)} onContextMenu={(x, y, items) => (ctxMenu = { x, y, items })} onInsertIntoNote={activeNote ? insertIntoActiveNote : null} />
+    <Chat {activeNote} pendingInsert={chatInsert} keepInMemory={keepModelInMemory} {llmEnabled} onClose={() => (chatOpen = false)} onContextMenu={(x, y, items) => (ctxMenu = { x, y, items })} onInsertIntoNote={activeNote ? insertIntoActiveNote : null} {activeView} {activeViewFolderId} {activeViewLabel} {activeViewFilters} />
   {/if}
 </div>
 

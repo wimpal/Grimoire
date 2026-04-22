@@ -20,22 +20,30 @@ use tauri::State;
 use crate::KeyStore;
 use super::{NoteRow, map_note_row};
 
+async fn get_embedding_model(db: &SqlitePool) -> String {
+    sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = 'embedding_model' LIMIT 1")
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "nomic-embed-text".to_string())
+}
+
 // ---------------------------------------------------------------------------
 // RAG commands (vector index + semantic search)
 // ---------------------------------------------------------------------------
 
-// The embed model is fixed here. nomic-embed-text is the standard lightweight
-// choice for Ollama: 274 MB, 768-dimensional vectors, purpose-built for text.
+// The embed model is configurable via the 'embedding_model' setting.
 // nomic-embed-text requires asymmetric prefixes: documents are prefixed with
 // "search_document: " and queries with "search_query: " for accurate retrieval.
-const EMBED_MODEL: &str = "nomic-embed-text";
+// Other models may require different prefixes or none at all.
 
-pub(crate) async fn embed_document(text: &str) -> Result<Vec<f32>, String> {
-    crate::vector::embed(&format!("search_document: {text}"), EMBED_MODEL).await
+pub(crate) async fn embed_document(text: &str, model: &str) -> Result<Vec<f32>, String> {
+    crate::vector::embed(&format!("search_document: {text}"), model).await
 }
 
-pub(crate) async fn embed_query(text: &str) -> Result<Vec<f32>, String> {
-    crate::vector::embed(&format!("search_query: {text}"), EMBED_MODEL).await
+pub(crate) async fn embed_query(text: &str, model: &str) -> Result<Vec<f32>, String> {
+    crate::vector::embed(&format!("search_query: {text}"), model).await
 }
 
 /// Split a long line into smaller pieces at sentence-ending punctuation.
@@ -187,9 +195,10 @@ pub async fn index_note(
         return crate::vector::remove(&vdb.0, note_id).await;
     }
 
+    let model = get_embedding_model(pool.inner()).await;
     let mut chunks: Vec<(i32, String, Vec<f32>)> = Vec::new();
     for (i, chunk_text) in raw_chunks.into_iter().enumerate() {
-        let embedding = embed_document(&chunk_text).await?;
+        let embedding = embed_document(&chunk_text, &model).await?;
         chunks.push((i as i32, chunk_text, embedding));
     }
 
@@ -220,7 +229,8 @@ pub async fn search_notes(
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<crate::vector::NoteMatch>, String> {
-    let embedding = embed_query(&query).await?;
+    let model = get_embedding_model(pool.inner()).await;
+    let embedding = embed_query(&query, &model).await?;
     let mut matches = crate::vector::search(
         &vdb.0,
         embedding,
@@ -320,6 +330,7 @@ pub async fn reindex_all(
         locked_rows.into_iter().map(|(id, lk)| (id, lk != 0)).collect()
     };
 
+    let model = get_embedding_model(pool.inner()).await;
     let mut count = 0usize;
     let mut failed: Vec<String> = Vec::new();
 
@@ -346,7 +357,7 @@ pub async fn reindex_all(
         let mut chunks: Vec<(i32, String, Vec<f32>)> = Vec::new();
         let mut note_ok = true;
         for (i, chunk_text) in raw_chunks.into_iter().enumerate() {
-            match embed_document(&chunk_text).await {
+            match embed_document(&chunk_text, &model).await {
                 Ok(embedding) => chunks.push((i as i32, chunk_text, embedding)),
                 Err(e) => {
                     failed.push(format!("\"{}\" — {}", note.title, e));
@@ -376,10 +387,12 @@ pub async fn reindex_all(
 #[cfg(debug_assertions)]
 #[tauri::command]
 pub async fn debug_search(
+    pool: State<'_, SqlitePool>,
     vdb: State<'_, crate::vector::VectorDb>,
     query: String,
 ) -> Result<Vec<crate::vector::RawMatch>, String> {
-    let embedding = embed_query(&query).await?;
+    let model = get_embedding_model(pool.inner()).await;
+    let embedding = embed_query(&query, &model).await?;
     crate::vector::raw_search(&vdb.0, embedding, 10).await
 }
 
@@ -484,6 +497,7 @@ pub async fn seed_notes(
         ),
     ];
 
+    let model = get_embedding_model(pool.inner()).await;
     let mut count = 0usize;
     let mut indexed = 0usize;
     for (title, content) in seeds {
@@ -504,7 +518,7 @@ pub async fn seed_notes(
         let mut chunks: Vec<(i32, String, Vec<f32>)> = Vec::new();
         let mut embed_ok = true;
         for (i, chunk_text) in raw_chunks.into_iter().enumerate() {
-            match embed_document(&chunk_text).await {
+            match embed_document(&chunk_text, &model).await {
                 Ok(embedding) => chunks.push((i as i32, chunk_text, embedding)),
                 Err(_) => { embed_ok = false; break; }
             }
