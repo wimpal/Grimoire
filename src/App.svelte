@@ -123,6 +123,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   let noteTags = $state([]);
   let noteLinks = $state([]);
   let noteBacklinks = $state([]);
+  let unlinkedMentions = $state([]);
   let tagFilter = $state(null); // when set, the note list shows only notes with this tag
 
   // All tags (for the sidebar browser)
@@ -968,9 +969,11 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     noteTags = [];
     noteLinks = [];
     noteBacklinks = [];
+    unlinkedMentions = [];
     invoke('get_note_tags', { noteId: note.id }).then(t => (noteTags = t)).catch(() => {});
     invoke('get_note_links', { noteId: note.id }).then(l => (noteLinks = l)).catch(() => {});
     invoke('get_backlinks', { noteId: note.id }).then(b => (noteBacklinks = b)).catch(() => {});
+    invoke('get_unlinked_mentions', { noteId: note.id, title: note.title }).then(m => (unlinkedMentions = m)).catch(() => {});
   }
 
   // ── Tab helpers ────────────────────────────────────────────────────────────
@@ -1295,15 +1298,40 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           invoke('get_note_tags', { noteId: updated.id }),
           invoke('get_note_links', { noteId: updated.id }),
           invoke('get_backlinks', { noteId: updated.id }),
+          invoke('get_unlinked_mentions', { noteId: updated.id, title: editorTitle }),
           invoke('list_all_tags'),
         ]))
-        .then(([tags, links, backlinks, updatedAllTags]) => {
+        .then(([tags, links, backlinks, mentions, updatedAllTags]) => {
           noteTags = tags;
           noteLinks = links;
           noteBacklinks = backlinks;
+          unlinkedMentions = mentions;
           allTags = updatedAllTags;
         })
         .catch(() => {});
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  async function convertMention(mention) {
+    if (!activeNote) return;
+    try {
+      const updatedContent = await invoke('convert_mention_to_link', {
+        noteId: mention.id,
+        title: activeNote.title,
+      });
+      // If the source note is currently open in the editor, update its content.
+      if (activeNote.id === mention.id) {
+        editorContent = updatedContent;
+      }
+      // Refresh unlinked mentions and backlinks so the converted entry moves sections.
+      const [mentions, backlinks] = await Promise.all([
+        invoke('get_unlinked_mentions', { noteId: activeNote.id, title: activeNote.title }),
+        invoke('get_backlinks', { noteId: activeNote.id }),
+      ]);
+      unlinkedMentions = mentions;
+      noteBacklinks = backlinks;
     } catch (e) {
       showError(e);
     }
@@ -2296,7 +2324,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           ></textarea>
         {/if}
       {/if}
-      {#if noteLinks.length > 0 || noteBacklinks.length > 0}
+      {#if noteLinks.length > 0 || noteBacklinks.length > 0 || unlinkedMentions.length > 0}
         <div class="note-footer">
           {#if noteLinks.length > 0}
             <div class="note-footer-section">
@@ -2311,6 +2339,17 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
               <span class="note-footer-label">Backlinks</span>
               {#each noteBacklinks as link}
                 <button class="link-pill" onclick={() => openNoteById(link.id)}>{link.title}</button>
+              {/each}
+            </div>
+          {/if}
+          {#if unlinkedMentions.length > 0}
+            <div class="note-footer-section">
+              <span class="note-footer-label">Unlinked mentions</span>
+              {#each unlinkedMentions as mention}
+                <span class="link-pill-group">
+                  <button class="link-pill" onclick={() => openNoteById(mention.id)}>{mention.title}</button>
+                  <button class="link-pill-action" onclick={() => convertMention(mention)} title="Convert to wiki-link">→ link</button>
+                </span>
               {/each}
             </div>
           {/if}

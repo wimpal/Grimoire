@@ -327,3 +327,146 @@ pub async fn get_graph_data(
 
     Ok((nodes, edges))
 }
+
+/// Return notes that mention the given title as plain text but do not already
+/// link to this note via [[wiki-link]]. These are "unlinked mentions" — the
+/// user can convert them to proper links from the note footer.
+///
+/// Notes in locked folders are excluded (their content is ciphertext and would
+/// produce false positives or negatives).
+#[tauri::command]
+pub async fn get_unlinked_mentions(
+    pool: State<'_, SqlitePool>,
+    note_id: i64,
+    title: String,
+) -> Result<Vec<LinkedNote>, String> {
+    // Plain-text pattern: title appears in content but NOT as [[title]].
+    // We do a LIKE pre-filter in SQL (cheap) and post-filter in Rust for the
+    // wiki-link exclusion — this avoids complex SQL escaping of bracket chars.
+    let plain_pattern = format!("%{}%", title);
+
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: i64,
+        title: String,
+        content: String,
+        folder_locked: i64,
+    }
+
+    let rows = sqlx::query_as::<_, Row>(
+        "SELECT n.id, n.title, n.content, COALESCE(f.locked, 0) AS folder_locked
+         FROM notes n
+         LEFT JOIN folders f ON f.id = n.folder_id
+         WHERE n.id != ?
+           AND n.content LIKE ?
+           AND n.id NOT IN (
+               SELECT source_id FROM note_links WHERE target_id = ?
+           )
+         ORDER BY n.title ASC",
+    )
+    .bind(note_id)
+    .bind(&plain_pattern)
+    .bind(note_id)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let wiki_link = format!("[[{}]]", title);
+
+    let mentions: Vec<LinkedNote> = rows
+        .into_iter()
+        .filter(|r| {
+            // Skip locked folders — their content is ciphertext.
+            if r.folder_locked != 0 {
+                return false;
+            }
+            // The LIKE pre-filter confirmed the title appears somewhere in the
+            // content. Now check that not every occurrence is already a wiki-link.
+            // We accept the note as an unlinked mention if the raw title string
+            // appears at least once outside of [[...]].
+            let stripped = r.content.replace(&wiki_link, "");
+            stripped.contains(title.as_str())
+        })
+        .map(|r| LinkedNote { id: r.id, title: r.title })
+        .collect();
+
+    Ok(mentions)
+}
+
+/// Replace the first plain-text occurrence of `title` in the given note's
+/// content with `[[title]]`, then persist the change and re-sync link relations.
+/// Returns the updated content so the frontend can refresh an open tab.
+#[tauri::command]
+pub async fn convert_mention_to_link(
+    pool: State<'_, SqlitePool>,
+    note_id: i64,
+    title: String,
+) -> Result<String, String> {
+    let content: String = sqlx::query_scalar("SELECT content FROM notes WHERE id = ?")
+        .bind(note_id)
+        .fetch_optional(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Note {note_id} not found"))?;
+
+    let wiki_link = format!("[[{title}]]");
+
+    // Replace only the first plain occurrence that is not already bracketed.
+    // Strategy: scan for `title`, check it is not preceded by `[[` and followed by `]]`.
+    let updated = replace_first_plain_mention(&content, &title, &wiki_link);
+
+    if updated == content {
+        // No plain occurrence found — nothing to do.
+        return Ok(content);
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    sqlx::query("UPDATE notes SET content = ?, updated_at = ? WHERE id = ?")
+        .bind(&updated)
+        .bind(now)
+        .bind(note_id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Re-sync wiki-links so the new [[title]] link appears in note_links immediately.
+    let links = parse_wiki_links(&updated);
+    sync_links(pool.inner(), note_id, &links).await?;
+
+    Ok(updated)
+}
+
+/// Replace the first occurrence of `needle` in `haystack` that is NOT already
+/// surrounded by `[[` and `]]`. Returns the original string if no such
+/// occurrence exists.
+fn replace_first_plain_mention(haystack: &str, needle: &str, replacement: &str) -> String {
+    let needle_len = needle.len();
+    let bytes = haystack.as_bytes();
+    let needle_bytes = needle.as_bytes();
+    let mut i = 0;
+
+    while i + needle_len <= haystack.len() {
+        if &bytes[i..i + needle_len] == needle_bytes {
+            // Check it is not already inside [[...]]:
+            // preceded by "[[" means bytes[i-2..i] == b"[["
+            // followed by "]]" means bytes[i+needle_len..i+needle_len+2] == b"]]"
+            let preceded_by_brackets = i >= 2 && &bytes[i - 2..i] == b"[[";
+            let followed_by_brackets = i + needle_len + 2 <= haystack.len()
+                && &bytes[i + needle_len..i + needle_len + 2] == b"]]";
+
+            if !(preceded_by_brackets && followed_by_brackets) {
+                let mut result = String::with_capacity(haystack.len() + replacement.len());
+                result.push_str(&haystack[..i]);
+                result.push_str(replacement);
+                result.push_str(&haystack[i + needle_len..]);
+                return result;
+            }
+        }
+        i += 1;
+    }
+    haystack.to_string()
+}

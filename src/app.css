@@ -1931,6 +1931,30 @@ li:hover .folder-count {
   border-color: var(--accent);
 }
 
+.link-pill-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.link-pill-action {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg2);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  font-family: var(--sans);
+  line-height: 1.5;
+}
+
+.link-pill-action:hover {
+  background: var(--bg3);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 /* Clear-tag-filter button in the notes panel header */
 
 .clear-filter-btn {
