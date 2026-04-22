@@ -288,25 +288,29 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     }
 
     // ── 1d. Verbosity instruction ────────────────────────────────────────────
-    if (verbosity === 'thorough') {
-      systemParts.push('## Style instruction\nProvide thorough, detailed answers with full context. Do not skip nuance.');
-    } else if (verbosity === 'caveman') {
-      systemParts.push('## Style instruction\nUse short, blunt sentences. Cut every unnecessary word.');
-    }
+    // Appended after the INSTRUCTIONS block (below) so it takes highest priority.
 
     // ── 2. RAG context ───────────────────────────────────────────────────────
     // Always search even when a note is open — the question may be relevant
     // to other notes beyond the one currently being edited.
     if (useNotes) {
       // Use the current message plus the previous user turn for the RAG query.
+      // Strip meta-question framing ("what have I written about X?", "tell me about X")
+      // so the semantic search matches topic content rather than the question phrasing.
       const recentUserMessages = history
         .filter(m => m.role === 'user')
         .slice(-2)
         .map(m => m.content)
         .join(' ');
+      const ragQuery = recentUserMessages
+        .replace(/what (have i|did i|do i have) (written?|noted?|said?) (about|on|regarding)\s*/gi, '')
+        .replace(/tell me (about|what i (wrote|know|noted) about)\s*/gi, '')
+        .replace(/what (are|is) my (notes?|thoughts?) (on|about)\s*/gi, '')
+        .replace(/show me (my notes? on|what i wrote about)\s*/gi, '')
+        .trim() || recentUserMessages;
       let matches = [];
       try {
-        matches = await invoke('search_notes', { query: recentUserMessages });
+        matches = await invoke('search_notes', { query: ragQuery });
       } catch (e) {
         notesError = `Note search failed: ${e}`;
       }
@@ -326,20 +330,44 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
     // ── Assemble system message ──────────────────────────────────────────────
     if (systemParts.length > 0) {
-      const systemMsg = {
-        role: 'system',
-        content:
-          `The user has asked a question. Below are search results from the user's personal notes.\n` +
+      const preamble =
+        `You are a personal knowledge assistant embedded in Grimoire, a local note-taking app.\n` +
+        `The user's notes are stored in the app. When the user asks "what have I written about X" or ` +
+        `"tell me about X", they are asking you to retrieve and summarise information from their own notes.\n` +
+        `You also have access to a feature guide that documents Grimoire's keyboard shortcuts and features.\n` +
+        `You do NOT have general world knowledge to draw on — every answer must come only from the notes or feature guide provided below. Never guess or use outside knowledge.`;
+
+      let content;
+      if (verbosity === 'caveman') {
+        content =
+          `${preamble}\n\n` +
+          systemParts.join('\n\n') +
+          `\n\nINSTRUCTIONS:\n` +
+          `- Use ONLY the notes above.\n` +
+          `- Read the note CONTENT and compress the key facts into telegraphic bullet points — no full sentences, no filler words, no articles.\n` +
+          `- Example good answer: "• metabolic process • microbes convert sugars → acids/gas/alcohol • lactic: yoghurt, kimchi • alcoholic: beer, wine → ethanol+CO2"\n` +
+          `- Never just list the note title. Always give the actual content.\n` +
+          `- If notes contain nothing relevant: "not in notes".\n` +
+          `- No speculation. No "According to". Ignore [[ ]] and **.`;
+      } else {
+        let styleInstruction = '';
+        if (verbosity === 'thorough') {
+          styleInstruction = '\n\nSTYLE: Provide thorough, detailed answers with full context. Do not skip nuance.';
+        }
+        content =
+          `${preamble}\n\n` +
+          `Below are excerpts from the user's notes that are relevant to their question.\n` +
           `Each result is a note with its title and content. Read the content of each note carefully.\n\n` +
           systemParts.join('\n\n') +
           `\n\nINSTRUCTIONS:\n` +
           `1. Answer the user's question using ONLY the information from the notes above.\n` +
           `2. If a note contains information that answers the question, use that information in your answer.\n` +
-          `3. Do not say "I don't see any information" if the notes contain relevant information.\n` +
+          `3. If the notes do NOT contain information to answer the question, say so directly. Do not speculate or make indirect connections.\n` +
           `4. Quote or paraphrase from the note content when possible.\n` +
-          `5. Ignore any formatting like brackets [[ ]] or asterisks **. Focus on the text.`,
-      };
-      payload = [systemMsg, ...history];
+          `5. Ignore any formatting like brackets [[ ]] or asterisks **. Focus on the text.` +
+          styleInstruction;
+      }
+      payload = [{ role: 'system', content }, ...history];
     }
 
     // Push a placeholder assistant message filled in token by token.
