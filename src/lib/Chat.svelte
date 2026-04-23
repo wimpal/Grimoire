@@ -32,6 +32,23 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   // ── State ──────────────────────────────────────────────────────────────────
 
+  // ── Chat input placeholder ──────────────────────────────────────────────────
+
+  const PLACEHOLDERS = [
+    'Consult the grimoire…',
+    'How to cast a fireball?',
+    'What are the ingredients for a healing potion?',
+    'Translate this ancient rune…',
+    'Ask the oracle…',
+    'Summon an answer from the void…',
+    'Which spell works best against undead?',
+    'Where did I write about the lost city?',
+    'What does my future hold? (Ask about your notes)',
+    'Speak, mortal…',
+  ];
+
+  const inputPlaceholder = PLACEHOLDERS[Math.floor(Math.random() * PLACEHOLDERS.length)];
+
   // Each message: { role: 'user' | 'assistant', content: string }
   let messages = $state([]);
   let input = $state('');
@@ -658,7 +675,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       bind:this={inputEl}
       bind:value={input}
       onkeydown={handleKeydown}
-      placeholder="Message… (Enter to send, Shift+Enter for newline)"
+      placeholder={inputPlaceholder}
       aria-label="Message"
       rows="6"
       disabled={isLoading || !llmEnabled}

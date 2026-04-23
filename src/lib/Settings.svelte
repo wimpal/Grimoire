@@ -25,6 +25,16 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   const isDev = import.meta.env.DEV;
 
   let activeSection = $state('llm');
+  const visibleTheme = $derived(theme === 'bag' ? 'dark' : theme);
+
+  function selectStandardAccent(nextAccent) {
+    onAccentChange(nextAccent);
+    if (theme === 'bag') onThemeChange('dark');
+  }
+
+  function selectBlackAndGreyAppearance() {
+    onThemeChange('bag');
+  }
 
   const sections = $derived([
     { id: 'llm',        label: 'LLM' },
@@ -406,45 +416,54 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         <div class="setting-row">
           <div class="setting-label">
             <span class="setting-name">Theme</span>
-            <span class="setting-desc">Controls light/dark mode. "System" follows your OS preference.</span>
+            <span class="setting-desc">Controls the base theme mode. "System" follows your OS preference.</span>
           </div>
-          <select value={theme} onchange={(e) => onThemeChange(e.currentTarget.value)}>
+          <select value={visibleTheme} onchange={(e) => onThemeChange(e.currentTarget.value)}>
             <option value="system">System</option>
             <option value="light">Light</option>
             <option value="dark">Dark</option>
             <option value="spellbook">Spellbook ✦</option>
+            <option value="matrix">Matrix ▓</option>
           </select>
         </div>
 
-        <div class="setting-row" class:faded={theme === 'spellbook'}>
+        <div class="setting-row" class:faded={theme === 'spellbook' || theme === 'matrix'}>
           <div class="setting-label">
             <span class="setting-name">Accent colour</span>
-            <span class="setting-desc">{theme === 'spellbook' ? 'Not available in Spellbook theme — accent is fixed gold.' : 'Changes the highlight colour used across the app.'}</span>
+            <span class="setting-desc">{theme === 'spellbook' ? 'Not available in Spellbook theme — accent is fixed gold.' : theme === 'matrix' ? 'Not available in Matrix theme — accent is fixed green.' : theme === 'bag' ? 'Black and grey uses a monochrome dark palette. Pick another swatch to return to Dark mode.' : 'Changes the highlight colour used across the app. Black and grey is available here as a monochrome palette option.'}</span>
           </div>
           <div class="accent-swatches">
             <button
               class="accent-swatch"
-              class:active={accent === 'red'}
+              class:active={theme !== 'bag' && accent === 'red'}
               style="--swatch-color: #9b2020"
               title="Crimson (default)"
-              disabled={theme === 'spellbook'}
-              onclick={() => onAccentChange('red')}
+              disabled={theme === 'spellbook' || theme === 'matrix'}
+              onclick={() => selectStandardAccent('red')}
             ></button>
             <button
               class="accent-swatch"
-              class:active={accent === 'cyan'}
+              class:active={theme !== 'bag' && accent === 'cyan'}
               style="--swatch-color: #0c6e7e"
               title="Cyan"
-              disabled={theme === 'spellbook'}
-              onclick={() => onAccentChange('cyan')}
+              disabled={theme === 'spellbook' || theme === 'matrix'}
+              onclick={() => selectStandardAccent('cyan')}
             ></button>
             <button
               class="accent-swatch"
-              class:active={accent === 'green'}
+              class:active={theme !== 'bag' && accent === 'green'}
               style="--swatch-color: #256b3a"
               title="Forest green"
-              disabled={theme === 'spellbook'}
-              onclick={() => onAccentChange('green')}
+              disabled={theme === 'spellbook' || theme === 'matrix'}
+              onclick={() => selectStandardAccent('green')}
+            ></button>
+            <button
+              class="accent-swatch accent-swatch-bag"
+              class:active={theme === 'bag'}
+              style="--swatch-color: #4a4a4a"
+              title="Black and grey"
+              disabled={theme === 'spellbook' || theme === 'matrix'}
+              onclick={selectBlackAndGreyAppearance}
             ></button>
           </div>
         </div>
@@ -843,6 +862,11 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     border-color: var(--text-h);
     outline: 2px solid var(--swatch-color);
     outline-offset: 2px;
+  }
+
+  .accent-swatch-bag {
+    background: #2c2c2c;
+    border-color: #767676;
   }
 
   /* ── Toggle ──────────────────────────────────────────────────────── */

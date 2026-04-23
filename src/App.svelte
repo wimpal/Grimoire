@@ -1035,6 +1035,20 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     noteBacklinks = [];
   }
 
+  // Closes the currently open note within the active tab, returning to the empty editor.
+  // The tab itself stays open — only the note is detached from it.
+  async function closeNote() {
+    if (isDirty) await saveNote();
+    tabs = tabs.map(t => t.id === activeTabId ? { ...t, noteId: null, label: 'New Tab' } : t);
+    activeNote = null;
+    editorTitle = '';
+    editorContent = '';
+    isDirty = false;
+    noteTags = [];
+    noteLinks = [];
+    noteBacklinks = [];
+  }
+
   // Activates an existing tab by ID. Auto-saves the current dirty note first.
   async function activateTab(id) {
     if (activeTabId === id) return;
@@ -2291,6 +2305,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
             <button class="graph-toggle" onclick={() => revealFolder(activeNote.folder_id)} title="Reveal in folder panel" aria-label="Reveal in folder panel">Reveal</button>
           {/if}
           <button class="graph-toggle" aria-label={activeTab?.readMode ? 'Switch to edit mode' : 'Switch to read mode'} onclick={toggleReadMode}>{activeTab?.readMode ? 'Edit' : 'Read'}</button>
+          <button class="close-note-btn" aria-label="Close note" title="Close note" onclick={closeNote}>✕</button>
           <span class="word-count">{wordCount} word{wordCount === 1 ? '' : 's'} · {readingTime} min</span>
         </div>
       </div>

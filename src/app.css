@@ -1342,6 +1342,20 @@ li:hover:not(:has(li:hover)) > .folder-row .icon-btn {
   background: transparent;
 }
 
+/* Close-note button — always visible, colours to danger on hover */
+.close-note-btn {
+  border-color: transparent !important;
+  background: transparent !important;
+  color: var(--text) !important;
+  opacity: 0.5;
+  transition: color 0.15s, opacity 0.15s;
+}
+.close-note-btn:hover {
+  color: var(--danger) !important;
+  border-color: var(--danger) !important;
+  opacity: 1;
+}
+
 .word-count {
   font-size: 11px;
   font-family: var(--mono);
@@ -2500,6 +2514,32 @@ li:hover .folder-count {
   --accent-bg: rgba(37, 107, 58, 0.08);
 }
 
+/* ── Black and grey theme ─────────────────────────────────────────────── */
+/* Monochrome dark theme: only black, gray, and white tones.               */
+
+[data-theme="bag"] {
+  --text: #b0b0b0;
+  --text-h: #f0f0f0;
+  --bg: #111111;
+  --bg2: #1c1c1c;
+  --bg3: #282828;
+  --border: #3a3a3a;
+  --accent: #e0e0e0;
+  --accent-bg: rgba(255, 255, 255, 0.08);
+  --danger: #d45d5d;
+  color-scheme: dark;
+}
+
+[data-theme="bag"][data-accent="cyan"] {
+  --accent: #cccccc;
+  --accent-bg: rgba(255, 255, 255, 0.08);
+}
+
+[data-theme="bag"][data-accent="green"] {
+  --accent: #cccccc;
+  --accent-bg: rgba(255, 255, 255, 0.08);
+}
+
 /* ══════════════════════════════════════════════════════════════════════════ */
 /* ██  SPELLBOOK THEME — The Grimoire                                      ██ */
 /* ══════════════════════════════════════════════════════════════════════════ */
@@ -2996,6 +3036,215 @@ li:hover .folder-count {
 }
 
 /* ── End of Spellbook theme ──────────────────────────────────────────────── */
+
+/* ══════════════════════════════════════════════════════════════════════════ */
+/* ██  MATRIX THEME — Hacker Terminal                                      ██ */
+/* ══════════════════════════════════════════════════════════════════════════ */
+/* Phosphor-green text on pure black. Monospace everywhere. CRT scanlines.   */
+/* Accent colour is fixed bright green — no accent picker when active.       */
+/* No structural changes — only CSS variable overrides and decoration.       */
+/* ──────────────────────────────────────────────────────────────────────── */
+
+/* ── Root variable overrides ─────────────────────────────────────────────── */
+
+[data-theme="matrix"] {
+  --text:       #00b330;              /* dim phosphor green — readable body  */
+  --text-h:     #00ff41;              /* bright phosphor — headings/emphasis */
+  --bg:         #000000;              /* pure black                          */
+  --bg2:        #010e01;              /* barely-there green tint for panels  */
+  --bg3:        #001a00;              /* hover state                         */
+  --border:     #003300;              /* dark green border                   */
+  --accent:     #00ff41;              /* fixed bright green accent           */
+  --accent-bg:  rgba(0, 255, 65, 0.1);
+  --danger:     #ff4444;              /* red kept for destructive actions    */
+  color-scheme: dark;
+
+  /* VT323 — classic CRT terminal look, falls back to system monospace */
+  --sans: 'VT323', ui-monospace, 'Courier New', monospace;
+  --mono: 'VT323', ui-monospace, 'Courier New', monospace;
+}
+
+/* ── Body ────────────────────────────────────────────────────────────────── */
+
+[data-theme="matrix"] body {
+  background: #000000;
+  font-size: 15px;
+  line-height: 1.5;
+  letter-spacing: 0.03em;
+}
+
+/* ── CRT scanline overlay ────────────────────────────────────────────────── */
+/* Fixed overlay over the entire viewport — very subtle, just a texture.     */
+
+[data-theme="matrix"] body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent 0px,
+    transparent 2px,
+    rgba(0, 0, 0, 0.08) 2px,
+    rgba(0, 0, 0, 0.08) 4px
+  );
+}
+
+/* ── Active/selected list items ──────────────────────────────────────────── */
+
+[data-theme="matrix"] .folder-list li.active {
+  background: transparent;
+  border-left: 2px solid var(--accent);
+  border-radius: 0;
+  color: var(--accent);
+}
+
+[data-theme="matrix"] .folder-list li:hover {
+  background: rgba(0, 255, 65, 0.06);
+}
+
+[data-theme="matrix"] .note-list li.active {
+  background: rgba(0, 255, 65, 0.08);
+  border-left: 3px solid var(--accent);
+  border-radius: 0;
+  color: var(--accent);
+}
+
+[data-theme="matrix"] .note-list li:hover {
+  background: rgba(0, 255, 65, 0.04);
+}
+
+/* ── Tag pills ───────────────────────────────────────────────────────────── */
+
+[data-theme="matrix"] .tag-pill {
+  border-color: rgba(0, 255, 65, 0.35);
+  background: transparent;
+  color: var(--text);
+}
+
+/* ── Title input ─────────────────────────────────────────────────────────── */
+
+[data-theme="matrix"] .title-input {
+  font-size: 20px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* ── Scrollbars ──────────────────────────────────────────────────────────── */
+
+[data-theme="matrix"] ::-webkit-scrollbar {
+  width: 4px;
+}
+[data-theme="matrix"] ::-webkit-scrollbar-thumb {
+  background: #003300;
+}
+[data-theme="matrix"] ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ── Empty editor — digital rain background ──────────────────────────────── */
+/* Pure CSS animation: staggered vertical streaks that scroll down.          */
+
+@keyframes matrix-rain-1 { from { background-position: 0 0;     } to { background-position: 0 200px; } }
+@keyframes matrix-rain-2 { from { background-position: 0 -80px; } to { background-position: 0 120px; } }
+
+[data-theme="matrix"] .empty-editor {
+  font-style: normal;
+  color: #00ff41;
+  letter-spacing: 0.1em;
+  position: relative;
+  overflow: hidden;
+}
+
+[data-theme="matrix"] .empty-editor::before,
+[data-theme="matrix"] .empty-editor::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    180deg,
+    transparent 0px,
+    transparent 14px,
+    rgba(0, 255, 65, 0.07) 14px,
+    rgba(0, 255, 65, 0.07) 16px,
+    transparent 16px,
+    transparent 28px,
+    rgba(0, 255, 65, 0.03) 28px,
+    rgba(0, 255, 65, 0.03) 29px
+  );
+  background-size: 100% 200px;
+}
+
+[data-theme="matrix"] .empty-editor::before {
+  animation: matrix-rain-1 4s linear infinite;
+  opacity: 0.7;
+}
+
+[data-theme="matrix"] .empty-editor::after {
+  animation: matrix-rain-2 6s linear infinite;
+  opacity: 0.5;
+}
+
+/* ── Lock screen ─────────────────────────────────────────────────────────── */
+
+[data-theme="matrix"] .lock-screen {
+  background: #000000;
+}
+
+[data-theme="matrix"] .lock-screen .lock-box {
+  background: #000000;
+  border: 1px solid #003300;
+  border-radius: 0;
+  box-shadow: 0 0 20px rgba(0, 255, 65, 0.15), inset 0 0 30px rgba(0, 0, 0, 0.8);
+}
+
+[data-theme="matrix"] .lock-screen .lock-title {
+  color: #00ff41;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  text-shadow: 0 0 8px rgba(0, 255, 65, 0.6);
+}
+
+[data-theme="matrix"] .lock-screen .lock-subtitle {
+  color: #00b330;
+}
+
+[data-theme="matrix"] .lock-screen .lock-field input {
+  background: #000000;
+  border-color: #003300;
+  color: #00ff41;
+  border-radius: 0;
+  caret-color: #00ff41;
+}
+[data-theme="matrix"] .lock-screen .lock-field input:focus {
+  border-color: #00ff41;
+  box-shadow: 0 0 0 1px rgba(0, 255, 65, 0.3);
+}
+[data-theme="matrix"] .lock-screen .lock-field input::placeholder {
+  color: #003300;
+  opacity: 1;
+}
+
+[data-theme="matrix"] .lock-screen .lock-btn {
+  background: #000000;
+  border-color: #00b330;
+  color: #00ff41;
+  border-radius: 0;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+[data-theme="matrix"] .lock-screen .lock-btn:not(:disabled):hover {
+  background: rgba(0, 255, 65, 0.1);
+  border-color: #00ff41;
+  box-shadow: 0 0 8px rgba(0, 255, 65, 0.3);
+}
+[data-theme="matrix"] .lock-screen .lock-btn:disabled {
+  opacity: 0.3;
+}
+
+/* ── End of Matrix theme ─────────────────────────────────────────────────── */
 
 .db-cell-input:focus {
   border-color: var(--accent);
