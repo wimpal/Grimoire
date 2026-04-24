@@ -1,0 +1,114 @@
+<!-- Copyright (C) 2026 Wim Palland — see App.svelte for license header. -->
+<script>
+  import { autofocus } from './utils/autofocus.js';
+
+  let {
+    notes = [],
+    folders = [],
+    activeNote = null,
+    selectedFolderId = null,
+    tagFilter = null,
+    isSeeding = false,
+    isReindexing = false,
+    inlineRenaming = $bindable(null),
+
+    onOpenNote,
+    onOpenNoteInNewTab,
+    onDeleteNote,
+    onConfirmInlineRename,
+    onOpenKanbanTab,
+    onSaveNote,
+    onClearTagFilter,
+    onSeedNotes,
+    onReindexAll,
+    onTableViewToggle,
+    tableViewOpen = false,
+    onNoteDragStart,
+    onNoteDragEnd,
+  } = $props();
+
+  let noteSort = $state('modified');
+
+  const sortedNotes = $derived.by(() => {
+    const arr = [...notes];
+    if (noteSort === 'name')    arr.sort((a, b) => a.title.localeCompare(b.title));
+    else if (noteSort === 'created') arr.sort((a, b) => b.created_at - a.created_at);
+    else arr.sort((a, b) => b.updated_at - a.updated_at);
+    return arr;
+  });
+</script>
+
+<div class="panel-header">
+  <h2>
+    {#if tagFilter}#{tagFilter}
+    {:else if selectedFolderId === 'all'}All Notes
+    {:else if selectedFolderId === null}Unfiled
+    {:else}{folders.find(f => f.id === selectedFolderId)?.name ?? ''}
+    {/if}
+  </h2>
+  {#if tagFilter}
+    <button class="clear-filter-btn" onclick={onClearTagFilter} title="Clear tag filter">✕</button>
+  {/if}
+  <select class="sort-select" bind:value={noteSort} title="Sort notes" aria-label="Sort notes">
+    <option value="modified">Modified</option>
+    <option value="created">Created</option>
+    <option value="name">Name</option>
+  </select>
+  {#if !tagFilter && selectedFolderId && selectedFolderId !== 'all'}
+    <button
+      class="panel-view-btn"
+      class:active={tableViewOpen}
+      aria-pressed={tableViewOpen}
+      title="Table view"
+      aria-label="Table view"
+      onclick={onTableViewToggle}
+    >Table</button>
+    <button
+      class="panel-view-btn"
+      title="Kanban view"
+      aria-label="Board view"
+      onclick={() => onOpenKanbanTab?.(selectedFolderId, folders.find(f => f.id === selectedFolderId)?.name ?? '')}
+    >Board</button>
+  {/if}
+</div>
+
+<ul>
+  {#each sortedNotes as note (note.id)}
+    <li
+      class:active={activeNote?.id === note.id}
+      class:locked-row={note.locked}
+      aria-current={activeNote?.id === note.id ? 'page' : undefined}
+      data-note-id={note.id}
+      draggable={!note.locked}
+      ondragstart={(e) => !note.locked && onNoteDragStart?.(e, note)}
+      ondragend={onNoteDragEnd}
+    >
+      {#if note.locked}
+        <span class="row-btn note-title note-locked"><span class="lock-icon">🔒</span>(locked)</span>
+      {:else if inlineRenaming?.id === note.id && inlineRenaming?.type === 'note'}
+        <input
+          class="inline-rename"
+          use:autofocus
+          bind:value={inlineRenaming.value}
+          onkeydown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); onConfirmInlineRename?.(); } }}
+          onblur={() => onConfirmInlineRename?.()}
+        />
+      {:else}
+        <span class="drag-handle" title="Drag to move" aria-hidden="true">⠇</span>
+        <button class="row-btn note-title" onclick={(e) => e.ctrlKey ? onOpenNoteInNewTab?.(note) : onOpenNote?.(note)}>{note.title}</button>
+        <button class="icon-btn danger" onclick={() => onDeleteNote?.(note.id)} title="Delete note" aria-label="Delete note {note.title}">✕</button>
+      {/if}
+    </li>
+  {:else}
+    <li class="empty" role="status">No notes here</li>
+  {/each}
+</ul>
+
+{#if import.meta.env.DEV && notes.length === 0}
+  <button class="seed-btn" onclick={onSeedNotes} disabled={isSeeding}>
+    {isSeeding ? 'Seeding…' : 'Seed test notes'}
+  </button>
+{/if}
+<button class="seed-btn" onclick={onReindexAll} disabled={isReindexing}>
+  {isReindexing ? 'Indexing…' : 'Re-index all'}
+</button>

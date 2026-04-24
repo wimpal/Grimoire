@@ -1,4 +1,4 @@
-<!-- Copyright (C) 2026 Wim Palland
+﻿<!-- Copyright (C) 2026 Wim Palland
 
 This file is part of Grimoire.
 
@@ -20,7 +20,6 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { openUrl } from '@tauri-apps/plugin-opener';
   import { onMount, tick } from 'svelte';
-  import { marked } from 'marked';
   import ActivityBar from './lib/ActivityBar.svelte';
   import Calendar from './lib/Calendar.svelte';
   import Chat from './lib/Chat.svelte';
@@ -30,136 +29,131 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   import LockScreen from './lib/LockScreen.svelte';
   import PasswordModal from './lib/PasswordModal.svelte';
   import TemplateModal from './lib/TemplateModal.svelte';
-  import NoteProperties from './lib/NoteProperties.svelte';
   import DatabaseView from './lib/DatabaseView.svelte';
   import Settings from './lib/Settings.svelte';
   import Search from './lib/Search.svelte';
   import ConfirmModal from './lib/ConfirmModal.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
   import ContextMenu from './lib/ContextMenu.svelte';
+  import FolderSidebar from './lib/FolderSidebar.svelte';
+  import NoteList from './lib/NoteList.svelte';
+  import NoteEditor from './lib/NoteEditor.svelte';
+  import { createSettings } from './lib/stores/settings.svelte.js';
+  import { createPanelLayout } from './lib/stores/panelLayout.svelte.js';
+  import { createBookmarks } from './lib/stores/bookmarks.svelte.js';
+  import { createTemplates } from './lib/stores/templates.svelte.js';
 
   const appWindow = getCurrentWindow();
 
-  // ── State ──────────────────────────────────────────────────────────────────
+  // ── Stores ─────────────────────────────────────────────────────────────────
+  const settings = createSettings();
+  const layout   = createPanelLayout();
+  const bm       = createBookmarks();
+  const tmpl     = createTemplates();
+
+  // ── Core state ─────────────────────────────────────────────────────────────
 
   let folders = $state([]);
   let notes = $state([]);
-  let bookmarks = $state([]); // BookmarkEntry[]
-  const bookmarkedNoteIds = $derived(new Set(bookmarks.map(b => b.note_id)));
-  let selectedFolderId = $state(null); // null = "All notes"
-  let activeNote = $state(null);       // the note currently open in the editor
+  let selectedFolderId = $state(null);
+  let activeNote = $state(null);
 
-  // ── Tab state ──────────────────────────────────────────────────────────────
-  // Each tab: { id: string, type: 'note'|'graph'|'chat', noteId: number|null, label: string, customLabel: string|null }
+  // ── Tab state ─────────────────────────────────────────────────────────────────
   let tabs = $state([]);
   let activeTabId = $state(null);
-  let activeTab = $derived(tabs.find(t => t.id === activeTabId) ?? null);
+  const activeTab = $derived(tabs.find(t => t.id === activeTabId) ?? null);
   function makeTabId() { return Math.random().toString(36).slice(2, 9); }
 
-  // Editor fields (kept in sync with activeNote)
-  let editorTitle = $state('');
+  let editorTitle   = $state('');
   let editorContent = $state('');
-  let isDirty = $state(false);
-
-  // Tracks the state of the background LanceDB indexing after each save.
-  // 'idle'     — no index operation in progress
-  // 'indexing' — embed calls are running (can be slow with many sentences)
-  // 'error'    — indexing failed; note is saved in SQLite but not searchable
-  let indexState = $state('idle');
-
-  // Inline-creation inputs — kept for Ctrl+N compatibility; see startNoteInline()
-  let newNoteTitleInputEl = $state(null); // kept for potential focus fallback
-
-  // Error display
-  let errorMsg = $state('');
-
-  // Chat panel
-  let chatOpen = $state(false);
-
-  // Focus / distraction-free mode
-  let focusMode = $state(false);
-  // Snapshot of panel visibility before entering focus, restored on exit.
-  let savedLayout = null;
-
-  function toggleFocusMode() {
-    if (focusMode) {
-      // Restore saved layout
-      if (savedLayout) {
-        foldersOpen = savedLayout.foldersOpen;
-        notesOpen   = savedLayout.notesOpen;
-        savedLayout = null;
-      }
-      focusMode = false;
-    } else {
-      savedLayout = { foldersOpen, notesOpen };
-      foldersOpen = false;
-      notesOpen   = false;
-      focusMode   = true;
-    }
-  }
-
-  $effect(() => {
-    document.body.classList.toggle('focus-mode', focusMode);
-  });
-
-  // When set, Chat.svelte will inject this text as a blockquote into its input.
-  // Uses a seq counter so the same text can be injected multiple times.
-  let chatInsert = $state(null); // { text: string, seq: number } | null
-
-  // Reference to the note editor textarea — used to read the current selection.
+  let isDirty       = $state(false);
+  let indexState    = $state('idle');
   let editorTextareaEl = $state(null);
 
-  // Calendar overlay
-  // (removed — calendar is now a tab type)
+  let errorMsg = $state('');
+
+  // When set, Chat.svelte will inject this text as a blockquote into its input.
+  let chatInsert = $state(null); // { text: string, seq: number } | null
 
   // Search panel
   let searchOpen = $state(false);
 
-  // Seed state
-  let isSeeding = $state(false);
+  // Seed/reindex state
+  let isSeeding    = $state(false);
   let isReindexing = $state(false);
 
   // Tags and links for the active note
-  let noteTags = $state([]);
-  let noteLinks = $state([]);
-  let noteBacklinks = $state([]);
+  let noteTags        = $state([]);
+  let noteLinks       = $state([]);
+  let noteBacklinks   = $state([]);
   let unlinkedMentions = $state([]);
-  let tagFilter = $state(null); // when set, the note list shows only notes with this tag
+  let tagFilter       = $state(null);
+  let allTags         = $state([]);
 
-  // All tags (for the sidebar browser)
-  let allTags = $state([]);
-  let tagSearch = $state('');
-  const TAG_LIMIT = 3;  let tagsOpen = $state(false);
-  let bookmarksOpen = $state(true);
+  // Inline-rename state (shared between FolderSidebar and NoteList)
+  let inlineRenaming = $state(null); // { id, type: 'folder'|'note', value }
 
-  // Templates
-  let templates = $state([]);
-  let selectedTemplateId = $state(-1); // -1 = Blank (built-in default)
-  let templatesOpen = $state(false);
-  let templateModalOpen = $state(false);
-  let editingTemplate = $state(null); // set to a template object to open the edit modal
+  // Per-folder expand state — true (default) means expanded. Shared with FolderSidebar.
+  let folderExpanded = $state({}); // { [folderId]: boolean }
 
   // Settings overlay
-  let settingsOpen = $state(false);
-  let keepModelInMemory = $state(localStorage.getItem('keepModelInMemory') === 'true');
+  let settingsOpen      = $state(false);
+  let quickSwitcherOpen = $state(false);
 
-  // Hardware capability — loaded non-blocking on startup.
-  // 'embeddingOnly' is the safe default until the first response arrives.
-  let hwCapability    = $state('embeddingOnly');
-  let llmForceEnabled = $state(false);
-  const llmEnabled = $derived(hwCapability === 'full' || llmForceEnabled);
-  let accent = $state(localStorage.getItem('accent') ?? 'red');
-  let theme  = $state(localStorage.getItem('theme')  ?? 'system');
-  let dailyNoteFormat = $state(localStorage.getItem('dailyNoteFormat') ?? 'DD-MM-YYYY');
+  // Database / table view
+  let tableViewOpen      = $state(false);
+  let folderHasProperties = $state(false);
+  let noteProperties     = $state([]);
+  let propertiesReady    = $state(true);
+  let activeViewFilters  = $state({});
 
-  $effect(() => {
-    localStorage.setItem('keepModelInMemory', String(keepModelInMemory));
+  // Password / lock state
+  let lockCheckDone    = $state(false);
+  let vaultLocked      = $state(false);
+  let vaultHasPassword = $state(false);
+  let folderUnlockTarget = $state(null);
+  let vaultPwModal     = $state(null);
+  let folderPwModal    = $state(null);
+  let noteDeletePending   = $state(null);
+  let folderDeletePending = $state(null);
+  let unlockedFolderIds   = $state(new Set());
+
+  // Context menu
+  let ctxMenu = $state(null);
+
+  // Tab rename signal for TabBar
+  let externalRenameTabId = $state(null);
+
+  // Note drag state
+  let isDragging       = $state(false);
+  let dragOverFolderId = $state(null); // not used directly in markup anymore but needed for note drag logic
+
+  // Derived
+  const activeView = $derived(
+    activeTab?.type === 'kanban' ? 'kanban'
+    : tableViewOpen ? 'database'
+    : null
+  );
+  const activeViewFolderId = $derived(
+    activeView === 'kanban' ? activeTab.folderId
+    : activeView === 'database' ? selectedFolderId
+    : null
+  );
+  const activeViewLabel = $derived.by(() => {
+    if (!activeView || !activeViewFolderId) return '';
+    const folder = folders.find(f => f.id === activeViewFolderId);
+    const name = folder?.name ?? 'Unknown';
+    return activeView === 'kanban' ? `Kanban — ${name}` : `Table — ${name}`;
   });
 
+  // Prevent "not allowed" drag cursor in Tauri/WebView2.
   $effect(() => {
-    localStorage.setItem('dailyNoteFormat', dailyNoteFormat);
+    const allow = (e) => e.preventDefault();
+    document.addEventListener('dragover', allow);
+    return () => document.removeEventListener('dragover', allow);
   });
 
+  // Persist tab state to localStorage.
   $effect(() => {
     localStorage.setItem('grimoire_tabs', JSON.stringify({
       tabs: tabs.map(t => ({ id: t.id, type: t.type, noteId: t.noteId, label: t.label, customLabel: t.customLabel })),
@@ -167,57 +161,16 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     }));
   });
 
-  $effect(() => {
-    localStorage.setItem('accent', accent);
-    localStorage.setItem('theme',  theme);
-
-    const root = document.documentElement;
-    // Accent — remove attribute when red so :root values remain the source of truth.
-    if (accent === 'red') {
-      root.removeAttribute('data-accent');
-    } else {
-      root.setAttribute('data-accent', accent);
-    }
-    // Theme — remove attribute when system so the OS media query fires normally.
-    if (theme === 'system') {
-      root.removeAttribute('data-theme');
-    } else {
-      root.setAttribute('data-theme', theme);
-    }
-  });
-
-  // Drag-and-drop
-  let dragOverFolderId = $state(null); // folder ID currently being hovered during a note drag
-  let isDragging = $state(false);      // true while a note drag is in progress
-
-  // Svelte's <svelte:window ondragover> is unreliable in Tauri/WebView2 — use raw DOM API instead.
-  // Without this, the browser shows a "not allowed" cursor everywhere outside explicit drop targets.
-  $effect(() => {
-    const allow = (e) => e.preventDefault();
-    document.addEventListener('dragover', allow);
-    return () => document.removeEventListener('dragover', allow);
-  });
-
-  // ── Context menu ───────────────────────────────────────────────────────────
-
-  let ctxMenu = $state(null); // { x, y, items } — null when closed
-
-  // In dev builds, a toggle in Settings lets you revert to the native WebView2
-  // context menu (useful for Inspect Element).
-  let devNativeContextMenu = $state(
-    import.meta.env.DEV ? (localStorage.getItem('devNativeContextMenu') === 'true') : false
-  );
+  // ── Context menu ─────────────────────────────────────────────────────────────────
 
   $effect(() => {
     if (import.meta.env.DEV) {
-      localStorage.setItem('devNativeContextMenu', String(devNativeContextMenu));
+      // devNativeContextMenu persistence is handled inside the settings store.
     }
-
-    // If the user switched to native, make sure any open custom menu is closed.
-    if (devNativeContextMenu) ctxMenu = null;
+    if (settings.devNativeContextMenu) ctxMenu = null;
 
     const handler = (e) => {
-      if (devNativeContextMenu) return; // let native menu show
+      if (settings.devNativeContextMenu) return;
       e.preventDefault();
       const items = buildCtxItems(e);
       if (items.length === 0) return;
@@ -240,8 +193,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     let items = /** @type {any[]} */ ([]);
 
     if (createNoteBtn) {
-      // Right-click on the "new note" header button shows template choices.
-      items = templates.map(t => ({
+      items = tmpl.templates.map(t => ({
         label: t.name,
         action: () => startNoteInline(t.id),
       }));
@@ -257,15 +209,15 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       const note = notes.find(n => n.id === noteId);
       items = [
         { label: 'Open in New Tab', action: () => note && openNoteInNewTab(note) },
-        { label: 'Duplicate',       action: async () => {
+        { label: 'Duplicate', action: async () => {
             await invoke('duplicate_note', { id: noteId });
             await loadNotes();
           }
         },
         { divider: true },
-        bookmarkedNoteIds.has(noteId)
-          ? { label: 'Remove from Bookmarks', action: () => removeBookmark(noteId) }
-          : { label: 'Add to Bookmarks',      action: () => addBookmark(noteId) },
+        bm.bookmarkedNoteIds.has(noteId)
+          ? { label: 'Remove from Bookmarks', action: () => bm.removeBookmark(noteId) }
+          : { label: 'Add to Bookmarks',      action: () => bm.addBookmark(noteId) },
         { divider: true },
         { label: 'Delete', action: () => deleteNote(noteId), danger: true },
       ];
@@ -287,7 +239,6 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         }
       }
     } else if (isEditor) {
-      // Capture selection NOW, at contextmenu time, before the textarea loses focus.
       const el = editorTextareaEl;
       const start = el?.selectionStart ?? 0;
       const end   = el?.selectionEnd   ?? 0;
@@ -295,7 +246,6 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       const selText = val.slice(start, end);
       const hasSel  = selText.length > 0;
 
-      /** @type {any[]} */
       const formatSubmenu = hasSel ? [
         { label: 'Bold',          action: () => applyInlineFormat(start, end, val, '**', '**') },
         { label: 'Italic',        action: () => applyInlineFormat(start, end, val, '*',  '*')  },
@@ -311,28 +261,9 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
       items = [
         ...(hasSel ? [{ label: 'Format', submenu: formatSubmenu }, { divider: true }] : []),
-        {
-          label: 'Cut',
-          disabled: !hasSel,
-          action: () => {
-            navigator.clipboard.writeText(selText);
-            editorContent = val.slice(0, start) + val.slice(end);
-            markDirty();
-          },
-        },
-        {
-          label: 'Copy',
-          disabled: !hasSel,
-          action: () => navigator.clipboard.writeText(selText),
-        },
-        {
-          label: 'Paste',
-          action: async () => {
-            const text = await navigator.clipboard.readText();
-            editorContent = val.slice(0, start) + text + val.slice(end);
-            markDirty();
-          },
-        },
+        { label: 'Cut',   disabled: !hasSel, action: () => { navigator.clipboard.writeText(selText); editorContent = val.slice(0, start) + val.slice(end); markDirty(); } },
+        { label: 'Copy',  disabled: !hasSel, action: () => navigator.clipboard.writeText(selText) },
+        { label: 'Paste', action: async () => { const text = await navigator.clipboard.readText(); editorContent = val.slice(0, start) + text + val.slice(end); markDirty(); } },
         ...(hasSel ? [{ divider: true }, { label: 'Send to Chat', action: () => sendSelectionToChat() }] : []),
       ];
     }
@@ -340,9 +271,6 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     return items;
   }
 
-  // Wraps the captured selection with a prefix and suffix (e.g. "**" for bold).
-  // Trailing whitespace is trimmed from the selection before wrapping — double-clicking
-  // a word in browsers selects the trailing space, which would break markdown syntax.
   function applyInlineFormat(start, end, val, prefix, suffix) {
     const sel     = val.slice(start, end);
     const trimmed = sel.trimEnd();
@@ -350,10 +278,6 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     markDirty();
   }
 
-  // Prepends a Markdown heading prefix to the selected text, ensuring it sits
-  // on its own line. If the selection is mid-line, newlines are inserted around
-  // it so only the selected content becomes the heading — not the rest of the line.
-  // Strips any existing heading prefix first so toggling works correctly.
   function applyLinePrefix(start, end, val, prefix) {
     const sel        = val.slice(start, end).trimEnd();
     const needBefore = start > 0 && val[start - 1] !== '\n';
@@ -384,12 +308,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     }
   }
 
-  // Triggers inline rename in TabBar for a tab by id.
-  // We signal TabBar via a reactive prop; it watches with $effect and calls startRename().
-  let externalRenameTabId = $state(null);
   function startTabRenameExternal(id) {
     externalRenameTabId = id;
-    // Reset after a tick so the same tab can be renamed twice consecutively.
     setTimeout(() => { externalRenameTabId = null; }, 50);
   }
 
@@ -401,7 +321,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     }
     if (!text && activeNote) text = activeNote.title;
     if (!text) return;
-    chatOpen = true;
+    layout.chatOpen = true;
     chatInsert = { text, seq: (chatInsert?.seq ?? 0) + 1 };
   }
 
@@ -412,185 +332,16 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     markDirty();
   }
 
-  // Quick Switcher
-  let quickSwitcherOpen = $state(false);
-
-  // Database / table view
-  let tableViewOpen = $state(false);
-  let dbKey = $state(0); // bumped to force DatabaseView remount after template sync
-  let folderHasProperties = $state(false); // true when the selected folder has any property defs
-  let noteProperties = $state([]); // properties for the active note (for RAG suffix)
-  let propertiesReady = $state(true); // false while NoteProperties is fetching, to prevent layout shift
-  let activeViewFilters = $state({}); // current filters from DatabaseView, for LLM context
-  // Tags shown in the sidebar: if searching, filter by prefix match;
-  // otherwise show the top TAG_LIMIT by note count.
-  let visibleTags = $derived(
-    tagSearch.trim()
-      ? allTags.filter(t => t.name.includes(tagSearch.trim().toLowerCase().replace(/^#/, '')))
-      : allTags.slice(0, TAG_LIMIT)
-  );
-
-  // Note sort order and sorted list.
-  let noteSort = $state('modified');
-  let sortedNotes = $derived.by(() => {
-    const arr = [...notes];
-    if (noteSort === 'name') arr.sort((a, b) => a.title.localeCompare(b.title));
-    else if (noteSort === 'created') arr.sort((a, b) => b.created_at - a.created_at);
-    else arr.sort((a, b) => b.updated_at - a.updated_at);
-    return arr;
-  });
-
-  // Derived view state for LLM context injection.
-  let activeView = $derived(
-    activeTab?.type === 'kanban' ? 'kanban'
-    : tableViewOpen ? 'database'
-    : null
-  );
-  let activeViewFolderId = $derived(
-    activeView === 'kanban' ? activeTab.folderId
-    : activeView === 'database' ? selectedFolderId
-    : null
-  );
-  let activeViewLabel = $derived.by(() => {
-    if (!activeView || !activeViewFolderId) return '';
-    const folder = folders.find(f => f.id === activeViewFolderId);
-    const name = folder?.name ?? 'Unknown';
-    return activeView === 'kanban' ? `Kanban — ${name}` : `Table — ${name}`;
-  });
-
-  // Word count and estimated reading time for the active note.
-  let wordCount = $derived(
-    editorContent ? editorContent.trim().split(/\s+/).filter(Boolean).length : 0
-  );
-  let readingTime = $derived(Math.max(1, Math.round(wordCount / 200)));
-
-  // Sidebar collapse state
-  let foldersOpen = $state(true);
-  let notesOpen = $state(true);
-
-  // Panel widths — persisted to localStorage, controlled by drag handles
-  const COLLAPSE_THRESHOLD = 80;
-  let foldersWidth = $state(Number(localStorage.getItem('grimoire:foldersWidth')) || 200);
-  let notesWidth   = $state(Number(localStorage.getItem('grimoire:notesWidth'))   || 240);
-  let chatWidth    = $state(Number(localStorage.getItem('grimoire:chatWidth'))    || 360);
-
-  function savePanelWidth(panel, width) {
-    localStorage.setItem(`grimoire:${panel}Width`, String(width));
-  }
-
-  // ── Password / lock state ──────────────────────────────────────────────────
-
-  // true while we're waiting for the vault-lock check on startup
-  let lockCheckDone = $state(false);
-  // true when the vault has a password and it hasn't been entered this session
-  let vaultLocked = $state(false);
-  // true when a vault password exists (independent of locked/unlocked state)
-  let vaultHasPassword = $state(false);
-
-  // Modal state for folder unlock
-  let folderUnlockTarget = $state(null); // { id, name } of folder waiting for password
-
-  // Modal state for vault password management
-  // mode: 'set' | 'change' | 'remove' | null
-  let vaultPwModal = $state(null);
-
-  // Modal state for folder password management
-  // mode: 'set' | 'remove' | null, folderId
-  let folderPwModal = $state(null);
-
-  // Pending delete confirmations — null when no dialog is open.
-  // noteDeletePending: id of note awaiting confirmation
-  // folderDeletePending: { id, name } of folder awaiting confirmation
-  let noteDeletePending = $state(null);
-  let folderDeletePending = $state(null);
-
-  // Set of folder IDs that have been unlocked in the current session.
-  // Used to show the "remove password" button for password-protected folders.
-  let unlockedFolderIds = $state(new Set());
-
-  // Compute grid column widths reactively from all panel states.
-  // $derived re-evaluates automatically whenever any of its dependencies change.
-  // Divider columns (5px) sit between each panel pair; they collapse to 0px when the
-  // adjacent panel is closed so the collapsed strip has no visible gap beside it.
-  let gridCols = $derived.by(() => {
-    if (focusMode) {
-      return [
-        '1fr',
-        ...(chatOpen ? ['5px', `${chatWidth}px`] : []),
-      ].join(' ');
-    }
-    return [
-      foldersOpen ? `${foldersWidth}px` : '28px',
-      foldersOpen ? '5px' : '0px',
-      notesOpen   ? `${notesWidth}px`   : '28px',
-      notesOpen   ? '5px' : '0px',
-      '1fr',
-      ...(chatOpen ? ['5px', `${chatWidth}px`] : []),
-    ].join(' ');
-  });
-
-  // ── Panel drag-to-resize ───────────────────────────────────────────────────
-
-  // Holds the in-progress drag: which panel, where the mouse started, and the
-  // width it had at that moment. Null when no drag is active.
-  let activeDrag = $state(null); // { panel: string, startX: number, startWidth: number }
-
-  function startDrag(panel, e) {
-    e.preventDefault();
-    const startWidth = panel === 'folders' ? foldersWidth
-                     : panel === 'notes'   ? notesWidth
-                     : chatWidth;
-    activeDrag = { panel, startX: e.clientX, startWidth };
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  }
-
-  function onDragMove(e) {
-    if (!activeDrag) return;
-    const delta = e.clientX - activeDrag.startX;
-    // Chat opens on the right, so its divider is on its left edge — dragging
-    // right makes it smaller, dragging left makes it larger (inverted delta).
-    const newWidth = activeDrag.panel === 'chat'
-      ? activeDrag.startWidth - delta
-      : activeDrag.startWidth + delta;
-
-    if (newWidth < COLLAPSE_THRESHOLD) {
-      // Snap collapsed — save the pre-drag width so reopening restores it.
-      savePanelWidth(activeDrag.panel, activeDrag.startWidth);
-      if (activeDrag.panel === 'folders') foldersOpen = false;
-      else if (activeDrag.panel === 'notes') notesOpen = false;
-      else chatOpen = false;
-      activeDrag = null;
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      return;
-    }
-
-    const clamped = Math.max(COLLAPSE_THRESHOLD, newWidth);
-    if (activeDrag.panel === 'folders') foldersWidth = clamped;
-    else if (activeDrag.panel === 'notes') notesWidth = clamped;
-    else chatWidth = clamped;
-  }
-
-  function onDragEnd() {
-    if (!activeDrag) return;
-    const width = activeDrag.panel === 'folders' ? foldersWidth
-                : activeDrag.panel === 'notes'   ? notesWidth
-                : chatWidth;
-    savePanelWidth(activeDrag.panel, width);
-    activeDrag = null;
-    document.body.style.cursor = '';
-    document.body.style.userSelect = '';
-  }
-
-  // ── Helpers ────────────────────────────────────────────────────────────────
+  // ── Helpers ─────────────────────────────────────────────────────────────────────
 
   function showError(e) {
     errorMsg = String(e);
     setTimeout(() => (errorMsg = ''), 4000);
   }
 
-  // ── Data loading ───────────────────────────────────────────────────────────
+  function markDirty() { isDirty = true; }
+
+  // ── Data loading ────────────────────────────────────────────────────────────────
 
   async function loadFolders() {
     try {
@@ -603,35 +354,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   async function loadAllTags() {
     try {
       allTags = await invoke('list_all_tags');
-    } catch (e) {
-      // Non-fatal — sidebar just shows no tags
-    }
-  }
-
-  async function loadTemplates() {
-    try {
-      templates = await invoke('list_templates');
-    } catch (e) {
-      // Non-fatal — picker just shows nothing
-    }
-  }
-
-  async function loadBookmarks() {
-    try {
-      bookmarks = await invoke('list_bookmarks');
-    } catch (e) {
-      // Non-fatal — bookmarks section just stays empty
-    }
-  }
-
-  async function addBookmark(noteId) {
-    await invoke('add_bookmark', { noteId });
-    await loadBookmarks();
-  }
-
-  async function removeBookmark(noteId) {
-    await invoke('remove_bookmark', { noteId });
-    await loadBookmarks();
+    } catch { /* non-fatal */ }
   }
 
   async function loadNotes() {
@@ -641,7 +364,6 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       } else if (selectedFolderId === 'all') {
         notes = await invoke('list_notes', { all: true });
       } else {
-        // null means "unfiled", a number means a specific folder
         notes = await invoke('list_notes', { folderId: selectedFolderId ?? null, all: false });
       }
     } catch (e) {
@@ -650,7 +372,6 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   }
 
   onMount(async () => {
-    // Check vault lock state before loading any content.
     try {
       const [locked, hasPw] = await Promise.all([
         invoke('is_vault_locked'),
@@ -658,22 +379,18 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       ]);
       vaultLocked = locked;
       vaultHasPassword = hasPw;
-    } catch (e) {
-      // If the check itself fails, treat as unlocked (e.g. DB not yet migrated — safe to show).
-    }
+    } catch { /* treat as unlocked */ }
     lockCheckDone = true;
 
     if (!vaultLocked) {
-      // Run independent data loads in parallel.
       await Promise.all([loadFolders(), loadNotes(), restoreTabs()]);
       if (tabs.length === 0) newTab();
       loadAllTags();
-      loadTemplates();
-      loadBookmarks();
+      tmpl.loadTemplates();
+      bm.loadBookmarks();
 
-      // Non-blocking — hardware detection can be slow (subprocess calls).
       invoke('get_hardware_info')
-        .then(hw => { hwCapability = hw.capability; llmForceEnabled = hw.llmForceEnabled; })
+        .then(hw => { settings.hwCapability = hw.capability; settings.llmForceEnabled = hw.llmForceEnabled; })
         .catch(() => {});
     }
 
@@ -681,100 +398,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     await getCurrentWindow().show();
   });
 
-  // ── Folder actions ─────────────────────────────────────────────────────────
-
-  // Build a tree structure from the flat folders list by parent_id.
-  // Returns: { folder, children }[]
-  function buildFolderTree(flatFolders, parentId = null) {
-    return flatFolders
-      .filter(f => (f.parent_id ?? null) === parentId)
-      .map(f => ({ folder: f, children: buildFolderTree(flatFolders, f.id) }));
-  }
-
-  let folderTree = $derived(buildFolderTree(folders));
-
-  // Per-folder expand state — true (default) means expanded.
-  let folderExpanded = $state({}); // { [folderId]: boolean }
-
-  function toggleFolder(id) {
-    folderExpanded = { ...folderExpanded, [id]: !(folderExpanded[id] ?? true) };
-  }
-  function expandAll() {
-    const expanded = {};
-    for (const f of folders) expanded[f.id] = true;
-    folderExpanded = expanded;
-  }
-  function collapseAll() {
-    const collapsed = {};
-    for (const f of folders) collapsed[f.id] = false;
-    folderExpanded = collapsed;
-  }
-
-  // ── Folder tree keyboard navigation ──────────────────────────────────────
-  // Queries only visible (in-DOM) primary row buttons in the folder tree.
-  // Collapsed children are {#if}-gated out of the DOM, so this naturally
-  // returns only items the user can see.
-  function getFolderTreeButtons() {
-    return /** @type {HTMLElement[]} */ (
-      Array.from(document.querySelectorAll('.folder-list .folder-row .row-btn:not([disabled])'))
-    );
-  }
-
-  async function handleFolderTreeKeydown(e) {
-    if (!['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
-    e.preventDefault();
-
-    const btns = getFolderTreeButtons();
-    const focused = /** @type {HTMLElement | null} */ (document.activeElement);
-    const idx = focused ? btns.indexOf(focused) : -1;
-
-    if (e.key === 'ArrowDown') {
-      btns[Math.min(idx + 1, btns.length - 1)]?.focus();
-    } else if (e.key === 'ArrowUp') {
-      btns[Math.max(idx - 1, 0)]?.focus();
-    } else if (e.key === 'ArrowRight') {
-      // Expand a collapsed folder (find the expand button in the same row).
-      const row = focused?.closest('.folder-row');
-      const expandBtn = /** @type {HTMLElement | null} */ (
-        row?.querySelector('.folder-expand-btn[aria-expanded="false"]')
-      );
-      if (expandBtn) {
-        expandBtn.click();
-        await tick();
-        // Move to first child after expanding.
-        const freshBtns = getFolderTreeButtons();
-        freshBtns[Math.min(idx + 1, freshBtns.length - 1)]?.focus();
-      }
-    } else if (e.key === 'ArrowLeft') {
-      const row = focused?.closest('.folder-row');
-      const expandBtn = /** @type {HTMLElement | null} */ (
-        row?.querySelector('.folder-expand-btn[aria-expanded="true"]')
-      );
-      if (expandBtn) {
-        // Collapse this folder.
-        expandBtn.click();
-      } else {
-        // Move to parent row's primary button.
-        const parentLi = focused?.closest('.folder-children')?.parentElement;
-        const parentBtn = /** @type {HTMLElement | null} */ (
-          parentLi?.querySelector(':scope > .folder-row .row-btn')
-        );
-        if (parentBtn) parentBtn.focus();
-      }
-    } else if (e.key === 'Home') {
-      btns[0]?.focus();
-    } else if (e.key === 'End') {
-      btns[btns.length - 1]?.focus();
-    }
-  }
-
-  // Inline rename — set on a newly-created item awaiting its first name.
-  let inlineRenaming = $state(null); // { id, type: 'folder'|'note', value }
-
-  // Svelte action: focus+select a newly mounted input element.
-  function autofocus(node) {
-    requestAnimationFrame(() => { node.focus(); node.select(); });
-  }
+  // ── Folder actions ──────────────────────────────────────────────────────────────
 
   async function startFolderInline() {
     try {
@@ -812,65 +436,9 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     }
   }
 
-  // ── Folder drag-to-reparent ────────────────────────────────────────────────
-
-  let draggingFolderId = $state(null);
-
-  function onFolderRowDragStart(e, folderId) {
-    e.stopPropagation();
-    e.dataTransfer.setData('folder-id', String(folderId));
-    e.dataTransfer.effectAllowed = 'move';
-    draggingFolderId = folderId;
-  }
-
-  function onFolderRowDragEnd() {
-    draggingFolderId = null;
-    dragOverFolderId = null;
-  }
-
-  // Check if `targetId` is a descendant-or-self of the folder being dragged.
-  function isFolderDescendantOrSelf(targetId, ancestorId) {
-    if (targetId === ancestorId) return true;
-    const node = folders.find(f => f.id === targetId);
-    if (!node || node.parent_id == null) return false;
-    return isFolderDescendantOrSelf(node.parent_id, ancestorId);
-  }
-
-  function onFolderDropZoneDragOver(e, targetFolderId) {
-    e.stopPropagation();
-    if (e.dataTransfer.types.includes('folder-id')) {
-      if (draggingFolderId && isFolderDescendantOrSelf(targetFolderId, draggingFolderId)) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-    } else {
-      onFolderDragOver(e, targetFolderId);
-    }
-    dragOverFolderId = targetFolderId;
-  }
-
-  async function onFolderDropZoneDrop(e, targetFolderId) {
-    e.stopPropagation();
-    e.preventDefault();
-    dragOverFolderId = null;
-    if (e.dataTransfer.types.includes('folder-id')) {
-      const movingId = Number(e.dataTransfer.getData('folder-id'));
-      if (!movingId || isFolderDescendantOrSelf(targetFolderId, movingId)) return;
-      try {
-        await invoke('move_folder', { id: movingId, newParentId: targetFolderId });
-        // Expand the target folder so the moved folder is visible.
-        folderExpanded = { ...folderExpanded, [targetFolderId]: true };
-        await loadFolders();
-      } catch (err) { showError(err); }
-    } else {
-      onFolderDrop(e, targetFolderId);
-    }
-  }
-
-  // ── Reveal in folder panel ─────────────────────────────────────────────────
-
   async function revealFolder(folderId) {
-    if (!foldersOpen) foldersOpen = true;
-    // Walk ancestors upward and expand each one.
+    if (!layout.foldersOpen) layout.foldersOpen = true;
+    // Walk ancestors upward and expand each one so the folder is in the DOM.
     const newExpanded = { ...folderExpanded };
     let current = folders.find(f => f.id === folderId);
     while (current?.parent_id) {
@@ -903,14 +471,12 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   }
 
   async function selectFolder(id) {
-    // Auto-save unsaved changes before leaving the current note.
     if (isDirty) await saveNote();
     selectedFolderId = id;
     tagFilter = null;
     activeNote = null;
     tableViewOpen = false;
     await loadNotes();
-    // Check if this folder has property definitions (for the table view toggle).
     if (id && id !== 'all') {
       invoke('get_property_defs', { folderId: id })
         .then(defs => { folderHasProperties = defs.length > 0; })
@@ -920,15 +486,14 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     }
   }
 
-  // ── Note actions ───────────────────────────────────────────────────────────
+  // ── Note actions ─────────────────────────────────────────────────────────────────
 
   async function startNoteInline(templateId = -1) {
-    notesOpen = true;
+    layout.notesOpen = true;
     const folderId = selectedFolderId === 'all' ? null : (selectedFolderId ?? null);
     try {
       const note = await invoke('create_note', { title: 'Untitled', folderId });
       await loadNotes();
-      // Apply template property defs and seed note_properties rows before navigation.
       if (folderId && templateId > 0) {
         try {
           const defs = await invoke('apply_template_to_note', { noteId: note.id, folderId, templateId });
@@ -936,15 +501,13 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         } catch { /* non-fatal */ }
       }
       navigateToNote(note);
-      // Apply template content.
-      const template = templates.find(t => t.id === templateId);
+      const template = tmpl.templates.find(t => t.id === templateId);
       const templateContent = template?.content ?? '';
       if (templateContent) {
         editorContent = templateContent;
         isDirty = true;
         invoke('update_note', { id: note.id, title: 'Untitled', content: templateContent }).catch(() => {});
       }
-      // Index in the background.
       indexState = 'indexing';
       invoke('index_note', { noteId: note.id, title: 'Untitled', content: templateContent })
         .then(() => { indexState = 'idle'; })
@@ -956,15 +519,12 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   }
 
   function openNote(note) {
-    // Auto-save unsaved changes before switching to a different note.
     if (isDirty && activeNote && activeNote.id !== note.id) saveNote();
     searchOpen = false;
     activeNote = note;
     editorTitle = note.title;
     editorContent = note.content;
     isDirty = false;
-    // If the note is in a folder, hold the textarea until the properties panel
-    // has loaded — prevents the content jumping down as properties appear.
     propertiesReady = !note.folder_id;
     noteTags = [];
     noteLinks = [];
@@ -976,33 +536,24 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     invoke('get_unlinked_mentions', { noteId: note.id, title: note.title }).then(m => (unlinkedMentions = m)).catch(() => {});
   }
 
-  // ── Tab helpers ────────────────────────────────────────────────────────────
-
-  // Toggles edit/read mode for the active tab.
   function toggleReadMode() {
     if (!activeTabId) return;
     tabs = tabs.map(t => t.id === activeTabId ? { ...t, readMode: !t.readMode } : t);
   }
 
-  // Navigates the active tab to a note (updating it in place).
-  // If no tab exists yet, creates the first one implicitly.
-  // This is called for all normal note navigation (sidebar click, search, links).
   function navigateToNote(note) {
     if (isDirty) saveNote();
     if (!activeTabId || tabs.length === 0) {
-      // No tabs at all — create the first one.
       const id = makeTabId();
       tabs = [{ id, type: 'note', noteId: note.id, label: note.title, customLabel: null, readMode: false }];
       activeTabId = id;
     } else {
       const currentTab = tabs.find(t => t.id === activeTabId);
       if (currentTab?.type !== 'note') {
-        // Non-note tab (kanban, graph, etc.) — keep it, open note in a new tab.
         const id = makeTabId();
         tabs = [...tabs, { id, type: 'note', noteId: note.id, label: note.title, customLabel: null, readMode: false }];
         activeTabId = id;
       } else {
-        // Reuse the current note tab.
         tabs = tabs.map(t => t.id === activeTabId
           ? { ...t, type: 'note', noteId: note.id, label: note.title }
           : t
@@ -1012,7 +563,6 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     openNote(note);
   }
 
-  // Opens a note in a brand-new tab without touching the current tab.
   function openNoteInNewTab(note) {
     if (isDirty) saveNote();
     const id = makeTabId();
@@ -1021,7 +571,6 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     openNote(note);
   }
 
-  // Creates a blank tab and activates it (Ctrl+T / + button).
   function newTab() {
     const id = makeTabId();
     tabs = [...tabs, { id, type: 'note', noteId: null, label: 'New Tab', customLabel: null, readMode: false }];
@@ -1035,8 +584,6 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     noteBacklinks = [];
   }
 
-  // Closes the currently open note within the active tab, returning to the empty editor.
-  // The tab itself stays open — only the note is detached from it.
   async function closeNote() {
     if (isDirty) await saveNote();
     tabs = tabs.map(t => t.id === activeTabId ? { ...t, noteId: null, label: 'New Tab' } : t);
@@ -1049,7 +596,6 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     noteBacklinks = [];
   }
 
-  // Activates an existing tab by ID. Auto-saves the current dirty note first.
   async function activateTab(id) {
     if (activeTabId === id) return;
     if (isDirty) await saveNote();
@@ -1065,17 +611,11 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         closeTab(id);
       }
     } else {
-      activeNote = null;
-      editorTitle = '';
-      editorContent = '';
-      isDirty = false;
-      noteTags = [];
-      noteLinks = [];
-      noteBacklinks = [];
+      activeNote = null; editorTitle = ''; editorContent = ''; isDirty = false;
+      noteTags = []; noteLinks = []; noteBacklinks = [];
     }
   }
 
-  // Closes a tab. Auto-saves if dirty, then activates the nearest remaining tab.
   async function closeTab(id) {
     const idx = tabs.findIndex(t => t.id === id);
     if (idx === -1) return;
@@ -1084,7 +624,6 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     tabs = newTabs;
     if (activeTabId === id) {
       if (newTabs.length === 0) {
-        // Always keep at least one tab — open a fresh New Tab.
         newTab();
       } else {
         const next = newTabs[idx] ?? newTabs[idx - 1];
@@ -1094,63 +633,32 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
             const note = await invoke('get_note', { id: next.noteId });
             openNote(note);
           } catch {
-            activeNote = null;
-            editorTitle = '';
-            editorContent = '';
+            activeNote = null; editorTitle = ''; editorContent = '';
           }
         } else {
-          activeNote = null;
-          editorTitle = '';
-          editorContent = '';
-          isDirty = false;
-          noteTags = [];
-          noteLinks = [];
-          noteBacklinks = [];
+          activeNote = null; editorTitle = ''; editorContent = ''; isDirty = false;
+          noteTags = []; noteLinks = []; noteBacklinks = [];
         }
       }
     }
   }
 
-  // Opens (or activates) a graph tab in the editor column.
   function openGraphTab() {
     if (isDirty) saveNote();
     const existing = tabs.find(t => t.type === 'graph');
-    if (existing) {
-      activeTabId = existing.id;
-      activeNote = null;
-      editorTitle = '';
-      editorContent = '';
-      isDirty = false;
-      return;
-    }
+    if (existing) { activeTabId = existing.id; activeNote = null; editorTitle = ''; editorContent = ''; isDirty = false; return; }
     const id = makeTabId();
     tabs = [...tabs, { id, type: 'graph', noteId: null, label: 'Graph', customLabel: null }];
-    activeTabId = id;
-    activeNote = null;
-    editorTitle = '';
-    editorContent = '';
-    isDirty = false;
+    activeTabId = id; activeNote = null; editorTitle = ''; editorContent = ''; isDirty = false;
   }
 
-  // Opens (or activates) a calendar tab in the editor column.
   function openCalendarTab() {
     if (isDirty) saveNote();
     const existing = tabs.find(t => t.type === 'calendar');
-    if (existing) {
-      activeTabId = existing.id;
-      activeNote = null;
-      editorTitle = '';
-      editorContent = '';
-      isDirty = false;
-      return;
-    }
+    if (existing) { activeTabId = existing.id; activeNote = null; editorTitle = ''; editorContent = ''; isDirty = false; return; }
     const id = makeTabId();
     tabs = [...tabs, { id, type: 'calendar', noteId: null, label: 'Calendar', customLabel: null }];
-    activeTabId = id;
-    activeNote = null;
-    editorTitle = '';
-    editorContent = '';
-    isDirty = false;
+    activeTabId = id; activeNote = null; editorTitle = ''; editorContent = ''; isDirty = false;
   }
 
   function openKanbanTab(folderId, folderName) {
@@ -1161,54 +669,28 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     loadNotes();
     invoke('get_property_defs', { folderId }).then(d => { folderHasProperties = d.length > 0; }).catch(() => {});
     const existing = tabs.find(t => t.type === 'kanban' && t.folderId === folderId);
-    if (existing) {
-      activeTabId = existing.id;
-      activeNote = null;
-      editorTitle = '';
-      editorContent = '';
-      isDirty = false;
-      return;
-    }
+    if (existing) { activeTabId = existing.id; activeNote = null; editorTitle = ''; editorContent = ''; isDirty = false; return; }
     const id = makeTabId();
     tabs = [...tabs, { id, type: 'kanban', noteId: null, label: `Kanban — ${folderName}`, customLabel: null, folderId }];
-    activeTabId = id;
-    activeNote = null;
-    editorTitle = '';
-    editorContent = '';
-    isDirty = false;
+    activeTabId = id; activeNote = null; editorTitle = ''; editorContent = ''; isDirty = false;
   }
 
-  // Opens (or activates) a chat tab in the editor column.
   function openChatTab() {
     if (isDirty) saveNote();
     const existing = tabs.find(t => t.type === 'chat');
-    if (existing) {
-      activeTabId = existing.id;
-      activeNote = null;
-      editorTitle = '';
-      editorContent = '';
-      isDirty = false;
-      return;
-    }
+    if (existing) { activeTabId = existing.id; activeNote = null; editorTitle = ''; editorContent = ''; isDirty = false; return; }
     const id = makeTabId();
     tabs = [...tabs, { id, type: 'chat', noteId: null, label: 'Chat', customLabel: null }];
-    activeTabId = id;
-    activeNote = null;
-    editorTitle = '';
-    editorContent = '';
-    isDirty = false;
+    activeTabId = id; activeNote = null; editorTitle = ''; editorContent = ''; isDirty = false;
   }
 
-  // Sets a custom display label for a tab (double-click rename in TabBar).
   function renameTab(id, label) {
     tabs = tabs.map(t => t.id === id ? { ...t, customLabel: label || null } : t);
   }
 
-  // Creates a new daily note for today ("DD-MM-YYYY") via the activity bar button.
-  // Always inserts a fresh note — uses "(2)", "(3)" suffixes when today already has one.
   async function createDailyNote() {
     try {
-      const note = await invoke('create_daily_note', { dateFormat: dailyNoteFormat });
+      const note = await invoke('create_daily_note', { dateFormat: settings.dailyNoteFormat });
       await loadNotes();
       openNoteInNewTab(note);
     } catch (e) {
@@ -1216,7 +698,6 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     }
   }
 
-  // Restores tabs from localStorage after the vault is unlocked.
   async function restoreTabs() {
     try {
       const saved = localStorage.getItem('grimoire_tabs');
@@ -1224,18 +705,16 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       const { tabs: savedTabs, activeTabId: savedActiveId } = JSON.parse(saved);
       if (!Array.isArray(savedTabs) || savedTabs.length === 0) return;
 
-      // Fetch all tab notes in parallel instead of sequentially.
       const results = await Promise.all(
         savedTabs.map(async t => {
           if (t.type === 'note' && t.noteId != null) {
             try {
               const note = await invoke('get_note', { id: t.noteId });
               return { tab: { ...t, label: note.title }, note };
-            } catch { return null; /* Note was deleted — drop it */ }
+            } catch { return null; }
           } else if (t.type === 'graph') {
             return { tab: t, note: null };
           }
-          // Chat tabs are not restored (no persistent content).
           return null;
         })
       );
@@ -1245,49 +724,10 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       tabs = valid.map(r => r.tab);
       const target = valid.find(r => r.tab.id === savedActiveId) ?? valid[valid.length - 1];
       activeTabId = target.tab.id;
-      // Reuse the already-fetched note — no second invoke needed.
       if (target.tab.type === 'note' && target.note) {
         openNote(target.note);
       }
-    } catch { /* Malformed localStorage data — start fresh */ }
-  }
-
-  // ── Template actions ───────────────────────────────────────────────────────
-
-  async function saveTemplate(name, title, content, properties) {
-    // Throws on failure so TemplateModal can display the error.
-    await invoke('create_template', { name, title, content, properties });
-    await loadTemplates();
-    templateModalOpen = false;
-  }
-
-  async function updateTemplate(name, title, content, properties) {
-    // Throws on failure so TemplateModal can display the error.
-    const savedId = editingTemplate.id;
-    await invoke('update_template', { id: savedId, name, title, content, properties });
-    await loadTemplates();
-    editingTemplate = null;
-    // Auto-sync: push the updated specs to all notes/folders tracked to this template.
-    try {
-      await invoke('sync_template_to_notes', { templateId: savedId });
-      // Bump the key so DatabaseView remounts and picks up the new column.
-      dbKey += 1;
-    } catch { /* non-fatal — sync errors should not block the save */ }
-  }
-
-  async function deleteTemplate(id) {
-    try {
-      await invoke('delete_template', { id });
-      await loadTemplates();
-      // Reset picker to Blank if the deleted template was selected.
-      if (selectedTemplateId === id) selectedTemplateId = -1;
-    } catch (e) {
-      showError(e);
-    }
-  }
-
-  function markDirty() {
-    isDirty = true;
+    } catch { /* start fresh */ }
   }
 
   async function saveNote() {
@@ -1300,13 +740,11 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       });
       activeNote = updated;
       isDirty = false;
-      await loadNotes(); // refresh the list so the title updates
-      // Index in the background — don't block the UI, but surface failures.
+      await loadNotes();
       indexState = 'indexing';
       invoke('index_note', { noteId: updated.id, title: editorTitle, content: editorContent })
         .then(() => { indexState = 'idle'; })
         .catch(() => { indexState = 'error'; });
-      // Sync tags and wiki-links, then refresh the displayed relations.
       invoke('sync_note_relations', { noteId: updated.id, content: editorContent })
         .then(() => Promise.all([
           invoke('get_note_tags', { noteId: updated.id }),
@@ -1335,11 +773,9 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         noteId: mention.id,
         title: activeNote.title,
       });
-      // If the source note is currently open in the editor, update its content.
       if (activeNote.id === mention.id) {
         editorContent = updatedContent;
       }
-      // Refresh unlinked mentions and backlinks so the converted entry moves sections.
       const [mentions, backlinks] = await Promise.all([
         invoke('get_unlinked_mentions', { noteId: activeNote.id, title: activeNote.title }),
         invoke('get_backlinks', { noteId: activeNote.id }),
@@ -1364,15 +800,11 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       const tab = tabs.find(t => t.type === 'note' && t.noteId === id);
       if (tab) await closeTab(tab.id);
       else if (activeNote?.id === id) {
-        activeNote = null;
-        editorTitle = '';
-        editorContent = '';
-        noteTags = [];
-        noteLinks = [];
-        noteBacklinks = [];
+        activeNote = null; editorTitle = ''; editorContent = '';
+        noteTags = []; noteLinks = []; noteBacklinks = [];
       }
       await loadNotes();
-      loadBookmarks();
+      bm.loadBookmarks();
       invoke('remove_note_index', { noteId: id }).catch(() => {});
     } catch (e) {
       showError(e);
@@ -1399,37 +831,147 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     dragOverFolderId = null;
   }
 
-  function onFolderDragOver(e, folderId) {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    dragOverFolderId = folderId;
+  async function openNoteById(id) {
+    try {
+      const note = await invoke('get_note', { id });
+      navigateToNote(note);
+    } catch (e) {
+      showError(e);
+    }
   }
 
-  async function onFolderDrop(e, folderId) {
-    e.preventDefault();
-    dragOverFolderId = null;
-    const noteId = Number(e.dataTransfer.getData('text/plain'));
-    if (!noteId) return;
-    await moveNote(noteId, folderId);
+  async function filterByTag(tag) {
+    tagFilter = tag;
+    selectedFolderId = null;
+    await loadNotes();
   }
 
-  // Save on Ctrl+S; lock vault on Ctrl+Shift+L; send selection to chat on Ctrl+Shift+Enter
+  async function clearTagFilter() {
+    tagFilter = null;
+    await loadNotes();
+  }
+
+  // ── Lock / unlock ───────────────────────────────────────────────────────────────
+
+  async function onVaultUnlocked() {
+    vaultLocked = false;
+    await loadFolders();
+    await loadNotes();
+    loadAllTags();
+    await restoreTabs();
+    if (tabs.length === 0) newTab();
+    invoke('reindex_all').catch(() => {});
+  }
+
+  async function lockVault() {
+    if (!vaultHasPassword) return;
+    try {
+      await invoke('lock_vault');
+      vaultLocked = true;
+      activeNote = null; editorTitle = ''; editorContent = ''; isDirty = false;
+      tabs = []; activeTabId = null;
+      notes = []; folders = []; allTags = [];
+    } catch (e) {
+      showError(e);
+    }
+  }
+
+  async function handleVaultPwSubmit(password) {
+    if (vaultPwModal === 'set' || vaultPwModal === 'change') {
+      await invoke('set_vault_password', { password });
+      vaultHasPassword = true;
+      vaultPwModal = null;
+      invoke('reindex_all').catch(() => {});
+    } else if (vaultPwModal === 'remove') {
+      await invoke('remove_vault_password', { password });
+      vaultHasPassword = false;
+      vaultPwModal = null;
+    }
+    return true;
+  }
+
+  function requestFolderUnlock(folder) {
+    folderUnlockTarget = folder;
+  }
+
+  async function handleFolderUnlockSafe(password) {
+    if (!folderUnlockTarget) return false;
+    const targetId = folderUnlockTarget.id;
+    const ok = await invoke('unlock_folder', { folderId: targetId, password });
+    if (ok) {
+      folderUnlockTarget = null;
+      unlockedFolderIds = new Set([...unlockedFolderIds, targetId]);
+      await loadFolders();
+      await loadNotes();
+      invoke('list_notes', { folderId: targetId })
+        .then(ns => { for (const n of ns) invoke('index_note', { noteId: n.id, title: n.title, content: n.content }).catch(() => {}); })
+        .catch(() => {});
+    }
+    return ok;
+  }
+
+  async function handleFolderPwSubmit(password) {
+    if (!folderPwModal) return true;
+    if (folderPwModal.mode === 'set') {
+      await invoke('set_folder_password', { folderId: folderPwModal.folderId, password });
+      if (activeNote?.folder_id === folderPwModal.folderId) {
+        activeNote = null; editorTitle = ''; editorContent = '';
+      }
+      const next = new Set(unlockedFolderIds);
+      next.delete(folderPwModal.folderId);
+      unlockedFolderIds = next;
+    } else if (folderPwModal.mode === 'remove') {
+      await invoke('remove_folder_password', { folderId: folderPwModal.folderId, password });
+      const next = new Set(unlockedFolderIds);
+      next.delete(folderPwModal.folderId);
+      unlockedFolderIds = next;
+      invoke('list_notes', { folderId: folderPwModal.folderId })
+        .then(ns => { for (const n of ns) invoke('index_note', { noteId: n.id, title: n.title, content: n.content }).catch(() => {}); })
+        .catch(() => {});
+    }
+    folderPwModal = null;
+    await loadFolders();
+    await loadNotes();
+    return true;
+  }
+
+  // ── Keyboard shortcuts ──────────────────────────────────────────────────────────
+
+  function handleEditorKeydown(e) {
+    if (e.key !== '[') return;
+    const el = /** @type {HTMLTextAreaElement} */ (e.currentTarget);
+    const { selectionStart: start, selectionEnd: end, value } = el;
+    const prevChar = value[start - 1];
+    e.preventDefault();
+    if (prevChar === '[') {
+      const before = value.slice(0, start - 1);
+      const after  = value.slice(end + (value[end] === ']' ? 1 : 0));
+      const cursor = before.length + 2;
+      editorContent = before + '[[]]' + after;
+      markDirty();
+      requestAnimationFrame(() => { el.selectionStart = cursor; el.selectionEnd = cursor; });
+    } else {
+      const before = value.slice(0, start);
+      const after  = value.slice(end);
+      const cursor = before.length + 1;
+      editorContent = before + '[]' + after;
+      markDirty();
+      requestAnimationFrame(() => { el.selectionStart = cursor; el.selectionEnd = cursor; });
+    }
+  }
+
   function handleKeydown(e) {
     if ((e.ctrlKey || e.metaKey) && e.key === 'p' && !e.shiftKey && !e.altKey) {
-      e.preventDefault();
-      quickSwitcherOpen = true;
+      e.preventDefault(); quickSwitcherOpen = true;
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 'f' && !e.shiftKey && !e.altKey) {
-      e.preventDefault();
-      searchOpen = true;
+      e.preventDefault(); searchOpen = true;
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 'n' && !e.shiftKey && !e.altKey) {
-      e.preventDefault();
-      startNoteInline();
+      e.preventDefault(); startNoteInline();
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 't' && !e.shiftKey && !e.altKey) {
-      e.preventDefault();
-      newTab();
+      e.preventDefault(); newTab();
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 'Tab' && tabs.length > 1) {
       e.preventDefault();
@@ -1440,43 +982,33 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       activateTab(next.id);
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 'w' && !e.shiftKey && !e.altKey) {
-      e.preventDefault();
-      if (activeTabId) closeTab(activeTabId);
+      e.preventDefault(); if (activeTabId) closeTab(activeTabId);
     }
     if (e.key === 'Delete' && !e.ctrlKey && !e.metaKey && !e.altKey) {
       const tag = /** @type {HTMLElement} */ (document.activeElement)?.tagName ?? '';
       const isEditing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
         || /** @type {HTMLElement} */ (document.activeElement)?.isContentEditable;
       if (!isEditing && activeNote && !activeNote.locked) {
-        e.preventDefault();
-        deleteNote(activeNote.id);
+        e.preventDefault(); deleteNote(activeNote.id);
       }
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
-      e.preventDefault();
-      saveNote();
+      e.preventDefault(); saveNote();
     }
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'L') {
-      e.preventDefault();
-      if (vaultHasPassword && !vaultLocked) lockVault();
+      e.preventDefault(); if (vaultHasPassword && !vaultLocked) lockVault();
     }
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'Enter') {
-      e.preventDefault();
-      sendSelectionToChat();
+      e.preventDefault(); sendSelectionToChat();
     }
     if (e.key === 'F11' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-      e.preventDefault();
-      toggleFocusMode();
+      e.preventDefault(); layout.toggleFocusMode();
     }
-    if (e.key === 'Escape' && focusMode) {
-      // Only exit focus mode if no modal/overlay is open
+    if (e.key === 'Escape' && layout.focusMode) {
       const noModal = !settingsOpen && !searchOpen && !quickSwitcherOpen
-        && !templateModalOpen && !noteDeletePending && !folderDeletePending
+        && !tmpl.templateModalOpen && !noteDeletePending && !folderDeletePending
         && !vaultPwModal && !folderPwModal && !folderUnlockTarget;
-      if (noModal) {
-        e.preventDefault();
-        toggleFocusMode();
-      }
+      if (noModal) { e.preventDefault(); layout.toggleFocusMode(); }
     }
   }
 
@@ -1505,195 +1037,10 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     }
   }
 
-  async function openNoteById(id) {
-    try {
-      const note = await invoke('get_note', { id });
-      navigateToNote(note);
-    } catch (e) {
-      showError(e);
-    }
-  }
-
-  async function filterByTag(tag) {
-    tagFilter = tag;
-    selectedFolderId = null;
-    await loadNotes();
-  }
-
-  async function clearTagFilter() {
-    tagFilter = null;
-    await loadNotes();
-  }
-
-  // ── Lock / unlock functions ────────────────────────────────────────────────
-
-  async function onVaultUnlocked() {
-    vaultLocked = false;
-    await loadFolders();
-    await loadNotes();
-    loadAllTags();
-    await restoreTabs();
-    if (tabs.length === 0) newTab();
-    // Re-index notes now that the vault is open.
-    invoke('reindex_all').catch(() => {});
-  }
-
-  async function lockVault() {
-    if (!vaultHasPassword) return;
-    try {
-      await invoke('lock_vault');
-      vaultLocked = true;
-      activeNote = null;
-      editorTitle = '';
-      editorContent = '';
-      isDirty = false;
-      tabs = [];
-      activeTabId = null;
-      notes = [];
-      folders = [];
-      allTags = [];
-    } catch (e) {
-      showError(e);
-    }
-  }
-
-  // Called when vault password modal submits.
-  async function handleVaultPwSubmit(password) {
-    if (vaultPwModal === 'set' || vaultPwModal === 'change') {
-      await invoke('set_vault_password', { password });
-      vaultHasPassword = true;
-      vaultPwModal = null;
-      // Re-index now that the vault key is in memory and LanceDB was just purged.
-      invoke('reindex_all').catch(() => {});
-    } else if (vaultPwModal === 'remove') {
-      await invoke('remove_vault_password', { password });
-      vaultHasPassword = false;
-      vaultPwModal = null;
-    }
-    // Return true to dismiss (onSubmit expects true = success).
-    return true;
-  }
-
-  // Called when a locked folder is clicked — show the unlock modal.
-  function requestFolderUnlock(folder) {
-    folderUnlockTarget = folder;
-  }
-
-  async function handleFolderUnlock(password) {
-    const ok = await invoke('unlock_folder', { folderId: folderUnlockTarget.id, password });
-    if (ok) {
-      folderUnlockTarget = null;
-      await loadFolders();
-      await loadNotes();
-      // Index this folder's notes in the background.
-      const folderNotes = await invoke('list_notes', { folderId: folderUnlockTarget?.id ?? null });
-      for (const n of folderNotes) {
-        invoke('index_note', { noteId: n.id, title: n.title, content: n.content }).catch(() => {});
-      }
-    }
-    return ok;
-  }
-
-  // Safe version — folderUnlockTarget is cleared before re-indexing above, so re-read notes.
-  async function handleFolderUnlockSafe(password) {
-    if (!folderUnlockTarget) return false;
-    const targetId = folderUnlockTarget.id;
-    const ok = await invoke('unlock_folder', { folderId: targetId, password });
-    if (ok) {
-      folderUnlockTarget = null;
-      unlockedFolderIds = new Set([...unlockedFolderIds, targetId]);
-      await loadFolders();
-      await loadNotes();
-      // Re-index notes in this folder.
-      invoke('list_notes', { folderId: targetId })
-        .then(ns => {
-          for (const n of ns) {
-            invoke('index_note', { noteId: n.id, title: n.title, content: n.content }).catch(() => {});
-          }
-        })
-        .catch(() => {});
-    }
-    return ok;
-  }
-
-  async function handleFolderPwSubmit(password) {
-    if (!folderPwModal) return true;
-    if (folderPwModal.mode === 'set') {
-      await invoke('set_folder_password', { folderId: folderPwModal.folderId, password });
-      // Clear the active note if it belongs to the folder just locked.
-      if (activeNote?.folder_id === folderPwModal.folderId) {
-        activeNote = null;
-        editorTitle = '';
-        editorContent = '';
-      }
-      // Folder is now locked — remove from unlocked session set.
-      const next = new Set(unlockedFolderIds);
-      next.delete(folderPwModal.folderId);
-      unlockedFolderIds = next;
-    } else if (folderPwModal.mode === 'remove') {
-      await invoke('remove_folder_password', { folderId: folderPwModal.folderId, password });
-      // Password gone — remove from unlocked session set.
-      const next = new Set(unlockedFolderIds);
-      next.delete(folderPwModal.folderId);
-      unlockedFolderIds = next;
-      // Re-index after removing folder password.
-      invoke('list_notes', { folderId: folderPwModal.folderId })
-        .then(ns => {
-          for (const n of ns) {
-            invoke('index_note', { noteId: n.id, title: n.title, content: n.content }).catch(() => {});
-          }
-        })
-        .catch(() => {});
-    }
-    folderPwModal = null;
-    await loadFolders();
-    await loadNotes();
-    return true;
-  }
-
-  // Auto-pair brackets in the editor.
-  // `[`  → inserts `[]` and places cursor between them.
-  // `[[` → when the previous char is already `[`, replaces it and inserts `[[]]`
-  //         with cursor between the pairs.
-  function handleEditorKeydown(e) {
-    if (e.key !== '[') return;
-    const el = /** @type {HTMLTextAreaElement} */ (e.currentTarget);
-    const { selectionStart: start, selectionEnd: end, value } = el;
-    const prevChar = value[start - 1];
-
-    e.preventDefault();
-
-    if (prevChar === '[') {
-      // Replace the already-inserted `[` + new `[` with `[[]]`.
-      // If the char after the cursor is `]` (the auto-paired one from the first `[`),
-      // consume it too so we don't end up with [[]]]
-      const before = value.slice(0, start - 1);
-      const after  = value.slice(end + (value[end] === ']' ? 1 : 0));
-      const cursor = before.length + 2; // inside [[ | ]]
-      editorContent = before + '[[]]' + after;
-      markDirty();
-      // Svelte's bind:value updates the DOM asynchronously; schedule cursor move.
-      requestAnimationFrame(() => {
-        el.selectionStart = cursor;
-        el.selectionEnd   = cursor;
-      });
-    } else {
-      // Plain `[` → `[]`.
-      const before = value.slice(0, start);
-      const after  = value.slice(end);
-      const cursor = before.length + 1; // inside [ | ]
-      editorContent = before + '[]' + after;
-      markDirty();
-      requestAnimationFrame(() => {
-        el.selectionStart = cursor;
-        el.selectionEnd   = cursor;
-      });
-    }
-  }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
-<svelte:document onmousemove={onDragMove} onmouseup={onDragEnd} />
+<svelte:document onmousemove={layout.onDragMove} onmouseup={layout.onDragEnd} />
 
 {#if !lockCheckDone}
   <!-- Blank while we check vault lock state to avoid a flash of content -->
@@ -1760,10 +1107,10 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   />
 {/if}
 
-{#if templateModalOpen}
-  <TemplateModal onSave={saveTemplate} onCancel={() => (templateModalOpen = false)} />
-{:else if editingTemplate}
-  <TemplateModal template={editingTemplate} onSave={updateTemplate} onCancel={() => (editingTemplate = null)} />
+{#if tmpl.templateModalOpen}
+  <TemplateModal onSave={tmpl.saveTemplate} onCancel={() => (tmpl.templateModalOpen = false)} />
+{:else if tmpl.editingTemplate}
+  <TemplateModal template={tmpl.editingTemplate} onSave={tmpl.updateTemplate} onCancel={() => (tmpl.editingTemplate = null)} />
 {/if}
 
 {#if noteDeletePending}
@@ -1786,7 +1133,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   />
 {/if}
 
-<!-- ── Activity bar ──────────────────────────────────────────────── -->
+<!-- ── Activity bar ───────────────────────────────────────────────────── -->
 <ActivityBar
   searchActive={searchOpen}
   showLock={vaultHasPassword}
@@ -1801,16 +1148,16 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   onForum={() => openUrl('https://grimoire.app/forum')}
 />
 
-<!-- ── Custom title bar ──────────────────────────────────────────── -->
+<!-- ── Custom title bar ─────────────────────────────────────────────── -->
 <div class="titlebar">
   <div class="titlebar-left">
-    <button class="titlebar-btn" onclick={() => (foldersOpen = !foldersOpen)} title="Toggle folders">
+    <button class="titlebar-btn" onclick={() => (layout.foldersOpen = !layout.foldersOpen)} title="Toggle folders">
       <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
         <rect x="1" y="1" width="13" height="13" rx="1"/>
         <line x1="5" y1="1" x2="5" y2="14"/>
       </svg>
     </button>
-    <button class="titlebar-btn" onclick={() => (notesOpen = !notesOpen)} title="Toggle notes list">
+    <button class="titlebar-btn" onclick={() => (layout.notesOpen = !layout.notesOpen)} title="Toggle notes list">
       <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
         <line x1="4" y1="4" x2="11" y2="4"/>
         <line x1="4" y1="7.5" x2="11" y2="7.5"/>
@@ -1833,12 +1180,12 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   <div class="titlebar-right">
     <button
       class="titlebar-btn"
-      class:titlebar-btn-active={focusMode}
-      onclick={toggleFocusMode}
+      class:titlebar-btn-active={layout.focusMode}
+      onclick={layout.toggleFocusMode}
       title="Focus mode (F11)"
     >
       <!-- Compress icon when in focus mode, expand icon when normal -->
-      {#if focusMode}
+      {#if layout.focusMode}
         <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="14,6 14,1 9,1"/>
           <polyline points="1,9 1,14 6,14"/>
@@ -1856,10 +1203,10 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     </button>
     <button
       class="titlebar-btn"
-      class:titlebar-btn-active={chatOpen}
-      onclick={() => (chatOpen = !chatOpen)}
-      title={llmEnabled ? 'Toggle chat' : 'Chat unavailable — check Hardware settings'}
-      disabled={!llmEnabled}
+      class:titlebar-btn-active={layout.chatOpen}
+      onclick={() => (layout.chatOpen = !layout.chatOpen)}
+      title={settings.llmEnabled ? 'Toggle chat' : 'Chat unavailable — check Hardware settings'}
+      disabled={!settings.llmEnabled}
     >
       <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
         <path d="M2 2h11a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H5l-3 3V3a1 1 0 0 1 1-1z"/>
@@ -1882,359 +1229,108 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   </div>
 </div>
 
-<div class="layout" style:grid-template-columns={gridCols}>
-  <!-- ── Sidebar: Folders ──────────────────────────────────────────── -->
-  <aside class="sidebar" class:collapsed={!foldersOpen}>
-    {#if foldersOpen}
-      <div class="panel-header">
-        <h2>Folders</h2>
-        <span class="panel-header-actions">
-          <button class="icon-btn" onclick={expandAll} title="Expand all">
-            <svg width="14" height="14" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="3,2.5 7.5,7 12,2.5"/>
-              <polyline points="3,7.5 7.5,12 12,7.5"/>
-            </svg>
-          </button>
-          <button class="icon-btn" onclick={collapseAll} title="Collapse all">
-            <svg width="14" height="14" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="3,7 7.5,2.5 12,7"/>
-              <polyline points="3,12 7.5,7.5 12,12"/>
-            </svg>
-          </button>
-          <button class="icon-btn" data-action="create-note-btn" onclick={() => startNoteInline()} title="New note (right-click to pick template)">
-            <svg width="14" height="14" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M11.5 1.5 L13.5 3.5 L5 12 L2 12.5 L2.5 9.5 Z"/>
-              <line x1="9.5" y1="3.5" x2="11.5" y2="5.5"/>
-            </svg>
-          </button>
-          <button class="icon-btn" onclick={startFolderInline} title="New folder">
-            <svg width="14" height="14" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M1 4A1 1 0 0 1 2 3H5L6.5 5H12A1 1 0 0 1 13 6V11A1 1 0 0 1 12 12H2A1 1 0 0 1 1 11V4Z"/>
-              <line x1="9.5" y1="7.5" x2="9.5" y2="10.5"/>
-              <line x1="8" y1="9" x2="11" y2="9"/>
-            </svg>
-          </button>
-        </span>
-        <button class="collapse-btn" onclick={() => (foldersOpen = false)} title="Collapse">‹</button>
-      </div>
-
-      {#if bookmarks.length > 0}
-        <section class="bookmarks-section">
-          <div class="sidebar-section-label">
-            <span>Bookmarks</span>
-            <button class="collapse-btn" onclick={() => (bookmarksOpen = !bookmarksOpen)} title={bookmarksOpen ? 'Collapse' : 'Expand'}>
-              {bookmarksOpen ? '˅' : '›'}
-            </button>
-          </div>
-          {#if bookmarksOpen}
-            <ul class="bookmark-list">
-              {#each bookmarks as bm (bm.note_id)}
-                <li class="bookmark-row" data-note-id={bm.note_id}>
-                  <button class="bookmark-name" onclick={() => openNoteById(bm.note_id)} title={bm.title}>
-                    {bm.title}
-                  </button>
-                  <button class="bookmark-remove icon-btn" onclick={() => removeBookmark(bm.note_id)} title="Remove bookmark">✕</button>
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        </section>
-      {/if}
-
-      <ul class="folder-list" role="tree" aria-label="Folders" onkeydown={handleFolderTreeKeydown}>
-        <li class:active={selectedFolderId === 'all'} data-folder-id="all" role="treeitem" aria-selected={selectedFolderId === 'all'}>
-          <div class="folder-row">
-            <span class="folder-expand-spacer"></span>
-            <button class="row-btn" onclick={() => selectFolder('all')}>All Notes</button>
-          </div>
-        </li>
-        <li
-          class:active={selectedFolderId === null}
-          class:drag-over={dragOverFolderId === 'unfiled'}
-          class:drag-active={isDragging || !!draggingFolderId}
-          data-folder-id="unfiled"
-          role="treeitem"
-          aria-selected={selectedFolderId === null}
-          ondragover={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; dragOverFolderId = 'unfiled'; }}
-          ondragleave={(e) => { if (dragOverFolderId === 'unfiled' && !e.currentTarget.contains(/** @type {Node} */ (e.relatedTarget))) dragOverFolderId = null; }}
-          ondrop={(e) => {
-            e.preventDefault(); dragOverFolderId = null;
-            if (e.dataTransfer.types.includes('folder-id')) {
-              const fid = Number(e.dataTransfer.getData('folder-id'));
-              if (fid) invoke('move_folder', { id: fid, newParentId: null }).then(() => loadFolders()).catch(showError);
-            } else {
-              const noteId = Number(e.dataTransfer.getData('text/plain'));
-              if (noteId) moveNote(noteId, null);
-            }
-          }}
-        >
-          <div class="folder-row">
-            <span class="folder-expand-spacer"></span>
-            <button class="row-btn" onclick={() => selectFolder(null)}>Unfiled</button>
-          </div>
-        </li>
-
-        {#snippet renderFolder(node)}
-          {@const folder = node.folder}
-          {@const isExpanded = folderExpanded[folder.id] ?? true}
-          <li
-            class:active={selectedFolderId === folder.id}
-            class:locked-row={folder.locked}
-            class:drag-over={dragOverFolderId === folder.id}
-            class:drag-active={(isDragging || !!draggingFolderId) && !folder.locked}
-            data-folder-id={folder.id}
-            role="treeitem"
-            aria-selected={selectedFolderId === folder.id}
-            aria-expanded={node.children.length > 0 ? (folderExpanded[folder.id] ?? true) : undefined}
-            draggable={!folder.locked}
-            ondragstart={(e) => !folder.locked && onFolderRowDragStart(e, folder.id)}
-            ondragend={onFolderRowDragEnd}
-            ondragover={(e) => !folder.locked && onFolderDropZoneDragOver(e, folder.id)}
-            ondragleave={(e) => { if (dragOverFolderId === folder.id && !e.currentTarget.contains(/** @type {Node} */ (e.relatedTarget))) dragOverFolderId = null; }}
-            ondrop={(e) => !folder.locked && onFolderDropZoneDrop(e, folder.id)}
-          >
-            <div class="folder-row">
-              {#if node.children.length > 0}
-                <button class="folder-expand-btn" onclick={() => toggleFolder(folder.id)} title={isExpanded ? 'Collapse' : 'Expand'} aria-expanded={isExpanded} aria-label={isExpanded ? `Collapse ${folder.name}` : `Expand ${folder.name}`}>
-                  {isExpanded ? '▾' : '▸'}
-                </button>
-              {:else}
-                <span class="folder-expand-spacer"></span>
-              {/if}
-
-              {#if folder.locked}
-                <button class="row-btn folder-name" onclick={() => requestFolderUnlock(folder)}>
-                  <span class="lock-icon">🔒</span>{folder.name === '<locked>' ? '(locked folder)' : folder.name}
-                </button>
-              {:else if inlineRenaming?.id === folder.id && inlineRenaming?.type === 'folder'}
-                <input
-                  class="inline-rename"
-                  use:autofocus
-                  bind:value={inlineRenaming.value}
-                  onkeydown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); confirmInlineRename(); } }}
-                  onblur={confirmInlineRename}
-                />
-              {:else}
-                {@const folderCount = notes.filter(n => n.folder_id === folder.id).length}
-                <button class="row-btn folder-name" onclick={() => selectFolder(folder.id)}>{folder.name}</button>
-                {#if folderCount > 0}<span class="folder-count">{folderCount}</span>{/if}
-                {#if unlockedFolderIds.has(folder.id)}
-                  <button class="icon-btn" title="Remove folder password"
-                    onclick={() => (folderPwModal = { mode: 'remove', folderId: folder.id })}>
-                    <svg width="13" height="13" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                      <rect x="2" y="7" width="11" height="7" rx="1"/>
-                      <path d="M5 7V4.5a2.5 2.5 0 0 1 5 0"/>
-                    </svg>
-                  </button>
-                {:else}
-                  <button class="icon-btn" title="Set folder password"
-                    onclick={() => (folderPwModal = { mode: 'set', folderId: folder.id })}>
-                    <svg width="13" height="13" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                      <rect x="2" y="7" width="11" height="7" rx="1"/>
-                      <path d="M5 7V4.5a2.5 2.5 0 0 1 5 0V7"/>
-                    </svg>
-                  </button>
-                {/if}
-              {/if}
-              <button class="icon-btn danger" onclick={() => deleteFolder(folder.id)} title="Delete folder" aria-label="Delete folder {folder.name}">✕</button>
-            </div>
-
-            {#if isExpanded && node.children.length > 0}
-              <ul class="folder-children" role="group">
-                {#each node.children as child}
-                  {@render renderFolder(child)}
-                {/each}
-              </ul>
-            {/if}
-          </li>
-        {/snippet}
-
-        {#each folderTree as node}
-          {@render renderFolder(node)}
-        {/each}
-      </ul>
-
-      {#if allTags.length > 0}
-        <div class="sidebar-section-label tags-header">
-          <span>Tags</span>
-          <button class="collapse-btn" onclick={() => (tagsOpen = !tagsOpen)} title={tagsOpen ? 'Collapse' : 'Expand'} aria-expanded={tagsOpen} aria-label={tagsOpen ? 'Collapse tags' : 'Expand tags'}>
-            {tagsOpen ? '˅' : '›'}
-          </button>
-        </div>
-        {#if tagsOpen}
-          <div class="tag-search-row">
-            <input
-              class="tag-search-input"
-              bind:value={tagSearch}
-              placeholder="Search tags…"
-            />
-            {#if tagSearch}
-              <button class="clear-filter-btn" onclick={() => (tagSearch = '')} title="Clear">✕</button>
-            {/if}
-          </div>
-          <ul class="tag-list">
-            {#each visibleTags as tag}
-              <li class:active={tagFilter === tag.name}>
-                <button class="row-btn" onclick={() => filterByTag(tag.name)}>#{tag.name}</button>
-                <span class="tag-count">{tag.count}</span>
-              </li>
-            {:else}
-              <li class="empty">No matches</li>
-            {/each}
-          </ul>
-          {#if !tagSearch && allTags.length > TAG_LIMIT}
-            <p class="tag-overflow">{allTags.length - TAG_LIMIT} more — search to find them</p>
-          {/if}
-        {/if}
-      {/if}
-
-      <!-- Templates section -->
-      <div class="sidebar-section-label">
-        <span>Templates</span>
-        <button class="collapse-btn" onclick={() => (templatesOpen = !templatesOpen)} title={templatesOpen ? 'Collapse' : 'Expand'} aria-expanded={templatesOpen} aria-label={templatesOpen ? 'Collapse templates' : 'Expand templates'}>
-          {templatesOpen ? '˅' : '›'}
-        </button>
-      </div>
-      {#if templatesOpen}
-        <ul class="template-list">
-          {#each templates as t (t.id)}
-            <li>
-              <span class="template-name">{t.name}</span>
-              {#if !t.builtin}
-                <button class="icon-btn" onclick={() => (editingTemplate = t)} title="Edit template" aria-label="Edit template {t.name}">✎</button>
-                <button class="icon-btn danger" onclick={() => deleteTemplate(t.id)} title="Delete template" aria-label="Delete template {t.name}">✕</button>
-              {/if}
-            </li>
-          {/each}
-        </ul>
-        <button class="vault-btn" onclick={() => (templateModalOpen = true)}>+ New template</button>
-      {/if}
+<div class="layout" style:grid-template-columns={layout.gridCols}>
+  <!-- Sidebar: Folders -->
+  <aside class="sidebar" class:collapsed={!layout.foldersOpen}>
+    {#if layout.foldersOpen}
+      <FolderSidebar
+        {folders}
+        {notes}
+        bookmarks={bm.bookmarks}
+        bookmarkedNoteIds={bm.bookmarkedNoteIds}
+        {allTags}
+        templates={tmpl.templates}
+        {selectedFolderId}
+        {tagFilter}
+        {unlockedFolderIds}
+        {isDragging}
+        bind:inlineRenaming
+        bind:folderExpanded
+        onSelectFolder={selectFolder}
+        onCreateNote={() => startNoteInline()}
+        onCreateFolder={() => startFolderInline()}
+        onDeleteFolder={deleteFolder}
+        onOpenNoteById={openNoteById}
+        onFilterByTag={filterByTag}
+        onClearTagFilter={clearTagFilter}
+        onOpenNoteInNewTab={openNoteInNewTab}
+        onRemoveBookmark={(id) => bm.removeBookmark(id)}
+        onRequestFolderUnlock={requestFolderUnlock}
+        onSetFolderPassword={(fid, mode) => (folderPwModal = { mode, folderId: fid })}
+        onNewTemplate={() => (tmpl.templateModalOpen = true)}
+        onEditTemplate={(t) => (tmpl.editingTemplate = t)}
+        onDeleteTemplate={(id) => tmpl.deleteTemplate(id, showError)}
+        onConfirmInlineRename={confirmInlineRename}
+        onMoveNote={moveNote}
+        onMoveFolder={loadFolders}
+      />
     {:else}
-      <button class="collapsed-strip" onclick={() => (foldersOpen = true)} title="Expand folders">
+      <button class="collapsed-strip" onclick={() => (layout.foldersOpen = true)} title="Expand folders">
         <span>Folders</span>
       </button>
     {/if}
   </aside>
-  <button class="panel-divider" aria-label="Resize folders panel" class:dragging={activeDrag?.panel === 'folders'} onmousedown={(e) => startDrag('folders', e)}></button>
 
-  <!-- ── Note list ─────────────────────────────────────────────────── -->
-  <div class="note-list" class:collapsed={!notesOpen}>
-    {#if notesOpen}
-      <div class="panel-header">
-        <h2>
-          {#if tagFilter}#{tagFilter}
-          {:else if selectedFolderId === 'all'}All Notes
-          {:else if selectedFolderId === null}Unfiled
-          {:else}{folders.find(f => f.id === selectedFolderId)?.name ?? ''}
-          {/if}
-        </h2>
-        {#if tagFilter}
-          <button class="clear-filter-btn" onclick={clearTagFilter} title="Clear tag filter">✕</button>
-        {/if}
-        <select class="sort-select" bind:value={noteSort} title="Sort notes" aria-label="Sort notes">
-          <option value="modified">Modified</option>
-          <option value="created">Created</option>
-          <option value="name">Name</option>
-        </select>
-        {#if !tagFilter && selectedFolderId && selectedFolderId !== 'all'}
-          <button
-            class="panel-view-btn"
-            class:active={tableViewOpen}
-            title="Table view"
-            aria-pressed={tableViewOpen}
-            aria-label="Table view"
-            onclick={() => {
-              if (isDirty) saveNote();
-              const kanban = tabs.find(t => t.type === 'kanban' && t.folderId === selectedFolderId);
-              if (kanban) tabs = tabs.filter(t => t.id !== kanban.id);
-              if (activeTabId === kanban?.id) { activeNote = null; editorTitle = ''; editorContent = ''; isDirty = false; }
-              tableViewOpen = !tableViewOpen;
-            }}
-          >Table</button>
-          <button
-            class="panel-view-btn"
-            title="Kanban view"
-            aria-label="Board view"
-            onclick={() => openKanbanTab(selectedFolderId, folders.find(f => f.id === selectedFolderId)?.name ?? '')}
-          >Board</button>
-        {/if}
-        <button class="collapse-btn" onclick={() => (notesOpen = false)} title="Collapse" aria-label="Collapse notes panel">‹</button>
-      </div>
+  <button class="panel-divider folders-divider" aria-label="Resize folders panel" class:dragging={layout.activeDrag?.panel === 'folders'} onmousedown={(e) => layout.startDrag('folders', e)}></button>
 
-      <ul>
-        {#each sortedNotes as note (note.id)}
-          <li
-            class:active={activeNote?.id === note.id}
-            class:locked-row={note.locked}
-            aria-current={activeNote?.id === note.id ? 'page' : undefined}
-            data-note-id={note.id}
-            draggable={!note.locked}
-            ondragstart={(e) => !note.locked && onNoteDragStart(e, note)}
-            ondragend={onNoteDragEnd}
-          >
-            {#if note.locked}
-              <span class="row-btn note-title note-locked"><span class="lock-icon">🔒</span>(locked)</span>
-            {:else if inlineRenaming?.id === note.id && inlineRenaming?.type === 'note'}
-              <input
-                class="inline-rename"
-                use:autofocus
-                bind:value={inlineRenaming.value}
-                onkeydown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') { e.preventDefault(); confirmInlineRename(); } }}
-                onblur={confirmInlineRename}
-              />
-            {:else}
-              <span
-                class="drag-handle"
-                title="Drag to move"
-                aria-hidden="true"
-              >⠇</span>
-              <button class="row-btn note-title" onclick={(e) => e.ctrlKey ? openNoteInNewTab(note) : navigateToNote(note)}>{note.title}</button>
-              <button class="icon-btn danger" onclick={() => deleteNote(note.id)} title="Delete note" aria-label="Delete note {note.title}">✕</button>
-            {/if}
-          </li>
-        {:else}
-          <li class="empty" role="status">No notes here</li>
-        {/each}
-      </ul>
-
-      {#if import.meta.env.DEV && notes.length === 0}
-        <button class="seed-btn" onclick={seedNotes} disabled={isSeeding}>
-          {isSeeding ? 'Seeding…' : 'Seed test notes'}
-        </button>
-      {/if}
-      <button class="seed-btn" onclick={reindexAll} disabled={isReindexing}>
-        {isReindexing ? 'Indexing…' : 'Re-index all'}
-      </button>
+  <!-- Note list -->
+  <div class="note-list" class:collapsed={!layout.notesOpen}>
+    {#if layout.notesOpen}
+      <NoteList
+        {notes}
+        {folders}
+        {activeNote}
+        {selectedFolderId}
+        {tagFilter}
+        {isSeeding}
+        {isReindexing}
+        bind:inlineRenaming
+        onOpenNote={navigateToNote}
+        onOpenNoteInNewTab={openNoteInNewTab}
+        onDeleteNote={deleteNote}
+        onConfirmInlineRename={confirmInlineRename}
+        onOpenKanbanTab={openKanbanTab}
+        onSaveNote={saveNote}
+        onClearTagFilter={clearTagFilter}
+        onSeedNotes={seedNotes}
+        onReindexAll={reindexAll}
+        {tableViewOpen}
+        onTableViewToggle={() => {
+          if (isDirty) saveNote();
+          const kanban = tabs.find(t => t.type === 'kanban' && t.folderId === selectedFolderId);
+          if (kanban) { tabs = tabs.filter(t => t.id !== kanban.id); if (activeTabId === kanban.id) { activeNote = null; editorTitle = ''; editorContent = ''; isDirty = false; } }
+          tableViewOpen = !tableViewOpen;
+        }}
+        onNoteDragStart={onNoteDragStart}
+        onNoteDragEnd={onNoteDragEnd}
+      />
     {:else}
-      <button class="collapsed-strip" onclick={() => (notesOpen = true)} title="Expand notes">
+      <button class="collapsed-strip" onclick={() => (layout.notesOpen = true)} title="Expand notes">
         <span>Notes</span>
       </button>
     {/if}
   </div>
-  <button class="panel-divider" aria-label="Resize notes panel" class:dragging={activeDrag?.panel === 'notes'} onmousedown={(e) => startDrag('notes', e)}></button>
 
-  <!-- ── Editor ────────────────────────────────────────────────────── -->
+  <button class="panel-divider notes-divider" aria-label="Resize notes panel" class:dragging={layout.activeDrag?.panel === 'notes'} onmousedown={(e) => layout.startDrag('notes', e)}></button>
+
+  <!-- Editor -->
   <main class="editor">
-    <!-- Search is always mounted so query/results survive panel close. Hidden via CSS when inactive. -->
     <div style="display: {searchOpen ? 'contents' : 'none'};">
       <Search
         {folders}
         open={searchOpen}
-        onSelectNote={(id) => {
-          searchOpen = false;
-          openNoteById(id);
-        }}
+        onSelectNote={(id) => { openNoteById(id); searchOpen = false; }}
       />
     </div>
     {#if !searchOpen}
       {#if tableViewOpen && selectedFolderId && selectedFolderId !== 'all'}
         <div class="tab-fullview">
           <button class="tab-fullview-close" onclick={() => (tableViewOpen = false)} title="Close table">✕ Close</button>
-          {#key dbKey}
+          {#key tmpl.dbKey}
           <DatabaseView
             folderId={selectedFolderId}
             onOpenNote={(id) => { tableViewOpen = false; openNoteById(id); }}
-            onFiltersChange={(f) => activeViewFilters = f}
+            onFiltersChange={(f) => (activeViewFilters = f)}
           />
           {/key}
         </div>
@@ -2242,9 +1338,9 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         <div class="tab-fullview">
           <button class="tab-fullview-close" onclick={() => closeTab(activeTabId)} title="Close graph">✕ Close</button>
           <Graph
-            activeNoteId={activeNote?.id ?? null}
-            {theme}
             onSelectNote={(id) => openNoteById(id)}
+            activeNoteId={activeNote?.id ?? null}
+            theme={settings.theme}
           />
         </div>
       {:else if activeTab?.type === 'calendar'}
@@ -2253,8 +1349,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           <Calendar
             onSelectNote={(note) => navigateToNote(note)}
             onRefresh={() => { loadFolders(); loadNotes(); }}
-            onSelectFolder={(id) => selectFolder(id)}
-            dateFormat={dailyNoteFormat}
+            onSelectFolder={selectFolder}
+            dateFormat={settings.dailyNoteFormat}
           />
         </div>
       {:else if activeTab?.type === 'kanban'}
@@ -2263,122 +1359,53 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           <Kanban folderId={activeTab.folderId} onOpenNote={(id) => openNoteById(id)} />
         </div>
       {:else if activeTab?.type === 'chat'}
-        <Chat activeNote={null} pendingInsert={null} keepInMemory={keepModelInMemory} {llmEnabled} onClose={() => closeTab(activeTabId)} onContextMenu={(x, y, items) => (ctxMenu = { x, y, items })} onInsertIntoNote={null} {activeView} {activeViewFolderId} {activeViewLabel} {activeViewFilters} />
+        <Chat activeNote={null} pendingInsert={null} keepInMemory={settings.keepModelInMemory} llmEnabled={settings.llmEnabled} onClose={() => closeTab(activeTabId)} onContextMenu={(x, y, items) => (ctxMenu = { x, y, items })} onInsertIntoNote={null} {activeView} {activeViewFolderId} {activeViewLabel} {activeViewFilters} />
       {:else if activeNote}
-      <div class="editor-toolbar">
-        <input
-          class="title-input"
-          bind:value={editorTitle}
-          oninput={markDirty}
-          placeholder="Note title"
-          aria-label="Note title"
+        <NoteEditor
+          {activeNote}
+          bind:editorTitle
+          bind:editorContent
+          {isDirty}
+          {indexState}
+          {folders}
+          {tabs}
+          {activeTabId}
+          {noteTags}
+          {noteLinks}
+          {noteBacklinks}
+          {unlinkedMentions}
+          {folderHasProperties}
+          {propertiesReady}
+          bind:editorTextareaEl
+          onMarkDirty={markDirty}
+          onSave={saveNote}
+          onCloseNote={closeNote}
+          onToggleReadMode={toggleReadMode}
+          onMoveNote={moveNote}
+          onRevealFolder={revealFolder}
+          onOpenKanbanTab={openKanbanTab}
+          onOpenNoteById={openNoteById}
+          onFilterByTag={filterByTag}
+          onConvertMention={convertMention}
+          onPropertiesLoad={(defs) => { noteProperties = defs; propertiesReady = true; folderHasProperties = defs.length > 0; }}
+          onHandleEditorKeydown={handleEditorKeydown}
+          onOpenTableView={() => {
+            if (isDirty) saveNote();
+            const kanban = tabs.find(t => t.type === 'kanban' && t.folderId === activeNote?.folder_id);
+            if (kanban) { tabs = tabs.filter(t => t.id !== kanban.id); if (activeTabId === kanban.id) { activeTabId = tabs[0]?.id ?? null; } }
+            selectedFolderId = activeNote?.folder_id;
+            activeNote = null; tableViewOpen = true;
+          }}
         />
-        <div class="toolbar-actions">
-          <label>
-            Move to:
-            <select
-              onchange={(e) => { const v = /** @type {HTMLSelectElement} */ (e.target).value; moveNote(activeNote.id, v === 'null' ? null : Number(v)); }}
-            >
-              <option value="null">Unfiled</option>
-              {#each folders as f (f.id)}
-                <option value={f.id} selected={activeNote.folder_id === f.id}>{f.name}</option>
-              {/each}
-            </select>
-          </label>
-          <button onclick={saveNote} disabled={!isDirty} class:index-error={!isDirty && indexState === 'error'} aria-live="polite" aria-atomic="true">
-            {isDirty ? 'Save (Ctrl+S)' : indexState === 'indexing' ? 'Indexing…' : indexState === 'error' ? '⚠ Index failed' : 'Saved'}
-          </button>
-          {#if folderHasProperties}
-            <button class="graph-toggle" aria-label="Switch to table view" onclick={() => {
-              if (isDirty) saveNote();
-              const kanban = tabs.find(t => t.type === 'kanban' && t.folderId === activeNote.folder_id);
-              if (kanban) tabs = tabs.filter(t => t.id !== kanban.id);
-              activeNote = null; tableViewOpen = true;
-            }}>← Table</button>
-          {/if}
-          {#if activeNote.folder_id && tabs.some(t => t.type === 'kanban' && t.folderId === activeNote.folder_id)}
-            <button class="graph-toggle" aria-label="Switch to board view" onclick={() => openKanbanTab(activeNote.folder_id, folders.find(f => f.id === activeNote.folder_id)?.name ?? '')}>
-              ← Board
-            </button>
-          {/if}
-          {#if activeNote.folder_id}
-            <button class="graph-toggle" onclick={() => revealFolder(activeNote.folder_id)} title="Reveal in folder panel" aria-label="Reveal in folder panel">Reveal</button>
-          {/if}
-          <button class="graph-toggle" aria-label={activeTab?.readMode ? 'Switch to edit mode' : 'Switch to read mode'} onclick={toggleReadMode}>{activeTab?.readMode ? 'Edit' : 'Read'}</button>
-          <button class="close-note-btn" aria-label="Close note" title="Close note" onclick={closeNote}>✕</button>
-          <span class="word-count">{wordCount} word{wordCount === 1 ? '' : 's'} · {readingTime} min</span>
-        </div>
-      </div>
-      {#if noteTags.length > 0}
-        <div class="note-tags-strip">
-          {#each noteTags as tag}
-            <button class="tag-pill" onclick={() => filterByTag(tag)}>#{tag}</button>
-          {/each}
-        </div>
+      {:else}
+        <div class="empty-editor">Select or create a note</div>
       {/if}
-      {#if activeNote.folder_id}
-        {#key activeNote.id}
-          <NoteProperties
-            noteId={activeNote.id}
-            folderId={activeNote.folder_id}
-            onPropertiesLoad={(p) => { noteProperties = p; folderHasProperties = p.length > 0 || folderHasProperties; propertiesReady = true; }}
-          />
-        {/key}
-      {/if}
-      {#if propertiesReady}
-        {#if activeTab?.readMode}
-          <div class="content-area read-mode-content">{@html marked.parse(editorContent || '')}</div>
-        {:else}
-          <textarea
-            class="content-area"
-            bind:this={editorTextareaEl}
-            bind:value={editorContent}
-            oninput={markDirty}
-            onkeydown={handleEditorKeydown}
-            placeholder="Write your note…"
-          ></textarea>
-        {/if}
-      {/if}
-      {#if noteLinks.length > 0 || noteBacklinks.length > 0 || unlinkedMentions.length > 0}
-        <div class="note-footer">
-          {#if noteLinks.length > 0}
-            <div class="note-footer-section">
-              <span class="note-footer-label">Links</span>
-              {#each noteLinks as link}
-                <button class="link-pill" onclick={() => openNoteById(link.id)}>{link.title}</button>
-              {/each}
-            </div>
-          {/if}
-          {#if noteBacklinks.length > 0}
-            <div class="note-footer-section">
-              <span class="note-footer-label">Backlinks</span>
-              {#each noteBacklinks as link}
-                <button class="link-pill" onclick={() => openNoteById(link.id)}>{link.title}</button>
-              {/each}
-            </div>
-          {/if}
-          {#if unlinkedMentions.length > 0}
-            <div class="note-footer-section">
-              <span class="note-footer-label">Unlinked mentions</span>
-              {#each unlinkedMentions as mention}
-                <span class="link-pill-group">
-                  <button class="link-pill" onclick={() => openNoteById(mention.id)}>{mention.title}</button>
-                  <button class="link-pill-action" onclick={() => convertMention(mention)} title="Convert to wiki-link">→ link</button>
-                </span>
-              {/each}
-            </div>
-          {/if}
-        </div>
-      {/if}
-    {:else}
-      <div class="empty-editor">Select or create a note</div>
-    {/if}
     {/if}
   </main>
 
-  {#if chatOpen && activeTab?.type !== 'chat'}
-    <button class="panel-divider chat-divider" aria-label="Resize chat panel" class:dragging={activeDrag?.panel === 'chat'} onmousedown={(e) => startDrag('chat', e)}></button>
-    <Chat {activeNote} pendingInsert={chatInsert} keepInMemory={keepModelInMemory} {llmEnabled} onClose={() => (chatOpen = false)} onContextMenu={(x, y, items) => (ctxMenu = { x, y, items })} onInsertIntoNote={activeNote ? insertIntoActiveNote : null} {activeView} {activeViewFolderId} {activeViewLabel} {activeViewFilters} />
+  {#if layout.chatOpen && activeTab?.type !== 'chat'}
+    <button class="panel-divider chat-divider" aria-label="Resize chat panel" class:dragging={layout.activeDrag?.panel === 'chat'} onmousedown={(e) => layout.startDrag('chat', e)}></button>
+    <Chat {activeNote} pendingInsert={chatInsert} keepInMemory={settings.keepModelInMemory} llmEnabled={settings.llmEnabled} onClose={() => (layout.chatOpen = false)} onContextMenu={(x, y, items) => (ctxMenu = { x, y, items })} onInsertIntoNote={activeNote ? insertIntoActiveNote : null} {activeView} {activeViewFolderId} {activeViewLabel} {activeViewFilters} />
   {/if}
 </div>
 
@@ -2398,18 +1425,18 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     onChangeVaultPassword={() => (vaultPwModal = 'change')}
     onRemoveVaultPassword={() => (vaultPwModal = 'remove')}
     onLockVault={lockVault}
-    keepInMemory={keepModelInMemory}
-    onKeepInMemoryChange={(v) => (keepModelInMemory = v)}
-    {accent}
-    onAccentChange={(v) => (accent = v)}
-    {theme}
-    onThemeChange={(v) => (theme = v)}
-    dateFormat={dailyNoteFormat}
-    onDateFormatChange={(v) => (dailyNoteFormat = v)}
-    {devNativeContextMenu}
-    onDevNativeContextMenuChange={(v) => (devNativeContextMenu = v)}
-    {llmEnabled}
-    onHardwareChange={(cap, force) => { hwCapability = cap; llmForceEnabled = force; }}
+    keepInMemory={settings.keepModelInMemory}
+    onKeepInMemoryChange={(v) => (settings.keepModelInMemory = v)}
+    accent={settings.accent}
+    onAccentChange={(v) => (settings.accent = v)}
+    theme={settings.theme}
+    onThemeChange={(v) => (settings.theme = v)}
+    dateFormat={settings.dailyNoteFormat}
+    onDateFormatChange={(v) => (settings.dailyNoteFormat = v)}
+    devNativeContextMenu={settings.devNativeContextMenu}
+    onDevNativeContextMenuChange={(v) => (settings.devNativeContextMenu = v)}
+    llmEnabled={settings.llmEnabled}
+    onHardwareChange={(cap, force) => { settings.hwCapability = cap; settings.llmForceEnabled = force; }}
   />
 {/if}
 
