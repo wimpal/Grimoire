@@ -74,6 +74,7 @@
 
 <ul>
   {#each sortedNotes as note (note.id)}
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions a11y_no_noninteractive_tabindex -->
     <li
       class:active={activeNote?.id === note.id}
       class:locked-row={note.locked}
@@ -82,6 +83,9 @@
       draggable={!note.locked}
       ondragstart={(e) => !note.locked && onNoteDragStart?.(e, note)}
       ondragend={onNoteDragEnd}
+      tabindex="0"
+      onclick={(e) => { if (note.locked) return; if (e.ctrlKey) onOpenNoteInNewTab?.(note); else onOpenNote?.(note); }}
+      onkeydown={(e) => { if (e.key === 'Enter' && !note.locked) { onOpenNote?.(note); } }}
     >
       {#if note.locked}
         <span class="row-btn note-title note-locked"><span class="lock-icon">🔒</span>(locked)</span>
@@ -95,7 +99,7 @@
         />
       {:else}
         <span class="drag-handle" title="Drag to move" aria-hidden="true">⠇</span>
-        <button class="row-btn note-title" onclick={(e) => e.ctrlKey ? onOpenNoteInNewTab?.(note) : onOpenNote?.(note)}>{note.title}</button>
+        <span class="row-btn note-title">{note.title}</span>
         <button class="icon-btn danger" onclick={() => onDeleteNote?.(note.id)} title="Delete note" aria-label="Delete note {note.title}">✕</button>
       {/if}
     </li>

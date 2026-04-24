@@ -1,0 +1,90 @@
+[data-accent="cyan"] {
+  --accent: #0c6e7e;
+  --accent-bg: rgba(12, 110, 126, 0.08);
+}
+
+[data-accent="green"] {
+  --accent: #256b3a;
+  --accent-bg: rgba(37, 107, 58, 0.08);
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-accent="cyan"] {
+    --accent: #2ab8c8;
+    --accent-bg: rgba(42, 184, 200, 0.15);
+  }
+
+  [data-accent="green"] {
+    --accent: #3dab65;
+    --accent-bg: rgba(61, 171, 101, 0.15);
+  }
+}
+
+[data-theme="light"] {
+  --text: #6b5f5f;
+  --text-h: #1a0f0f;
+  --bg: #fdfaf9;
+  --bg2: #f6f0ef;
+  --bg3: #ede5e4;
+  --border: #ddd4d3;
+  --accent: #9b2020;
+  --accent-bg: rgba(155, 32, 32, 0.08);
+  --danger: #c0392b;
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --text: #9e8f8f;
+  --text-h: #f0e8e8;
+  --bg: #171412;
+  --bg2: #201a1a;
+  --bg3: #2b2222;
+  --border: #352828;
+  --accent: #c0443a;
+  --accent-bg: rgba(192, 68, 58, 0.15);
+  --danger: #e06060;
+  color-scheme: dark;
+}
+
+[data-theme="dark"][data-accent="cyan"] {
+  --accent: #2ab8c8;
+  --accent-bg: rgba(42, 184, 200, 0.15);
+}
+
+[data-theme="dark"][data-accent="green"] {
+  --accent: #3dab65;
+  --accent-bg: rgba(61, 171, 101, 0.15);
+}
+
+[data-theme="light"][data-accent="cyan"] {
+  --accent: #0c6e7e;
+  --accent-bg: rgba(12, 110, 126, 0.08);
+}
+
+[data-theme="light"][data-accent="green"] {
+  --accent: #256b3a;
+  --accent-bg: rgba(37, 107, 58, 0.08);
+}
+
+[data-theme="bag"] {
+  --text: #b0b0b0;
+  --text-h: #f0f0f0;
+  --bg: #111111;
+  --bg2: #1c1c1c;
+  --bg3: #282828;
+  --border: #3a3a3a;
+  --accent: #e0e0e0;
+  --accent-bg: rgba(255, 255, 255, 0.08);
+  --danger: #d45d5d;
+  color-scheme: dark;
+}
+
+[data-theme="bag"][data-accent="cyan"] {
+  --accent: #cccccc;
+  --accent-bg: rgba(255, 255, 255, 0.08);
+}
+
+[data-theme="bag"][data-accent="green"] {
+  --accent: #cccccc;
+  --accent-bg: rgba(255, 255, 255, 0.08);
+}
