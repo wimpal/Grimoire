@@ -12,6 +12,11 @@
   --accent:     #c8972a;
   --accent-bg:  rgba(200, 151, 42, 0.13);
   --danger:     #c0392b;
+  --diff-add-bg: rgba(76, 175, 80, 0.12);
+  --diff-add-border: rgba(76, 175, 80, 0.25);
+  --diff-remove-bg: rgba(211, 47, 47, 0.12);
+  --diff-remove-border: rgba(211, 47, 47, 0.25);
+  --diff-unchanged-bg: transparent;
   color-scheme: dark;
 
   --sans: 'Palatino Linotype', 'Book Antiqua', Palatino, Georgia, serif;

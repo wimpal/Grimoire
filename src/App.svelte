@@ -19,7 +19,9 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   import { invoke } from '@tauri-apps/api/core';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { openUrl } from '@tauri-apps/plugin-opener';
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
+  import { listen } from '@tauri-apps/api/event';
+  import { computeDiff, applyAcceptedHunks } from './lib/utils/diff.js';
   import ActivityBar from './lib/ActivityBar.svelte';
   import Calendar from './lib/Calendar.svelte';
   import Chat from './lib/Chat.svelte';
@@ -74,6 +76,12 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   // When set, Chat.svelte will inject this text as a blockquote into its input.
   let chatInsert = $state(null); // { text: string, seq: number } | null
+
+  // Improve note state
+  let improveState = $state({ status: 'idle', instruction: '', improvedText: '', hunks: [], originalContent: '', acceptedIndices: [], rejectedIndices: [] });
+
+  // Refine hunk state
+  let refineState = $state({ status: 'idle', hunkIndex: null, x: 0, y: 0 });
 
   // Search panel
   let searchOpen = $state(false);
@@ -265,6 +273,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         { label: 'Copy',  disabled: !hasSel, action: () => navigator.clipboard.writeText(selText) },
         { label: 'Paste', action: async () => { const text = await navigator.clipboard.readText(); editorContent = val.slice(0, start) + text + val.slice(end); markDirty(); } },
         ...(hasSel ? [{ divider: true }, { label: 'Send to Chat', action: () => sendSelectionToChat() }] : []),
+        { divider: true },
+        { label: 'Suggest improvements', action: () => startImprove(), disabled: !editorContent || improveState.status !== 'idle' },
       ];
     }
 
@@ -330,6 +340,216 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     const { selectionStart, value } = editorTextareaEl;
     editorContent = value.slice(0, selectionStart) + '\n\n' + text + '\n\n' + value.slice(selectionStart);
     markDirty();
+  }
+
+  // ── Improve note ─────────────────────────────────────────────────────────────────
+
+  /** @type {import('@tauri-apps/api/event').UnlistenFn | null} */
+  let improveUnlisten = null;
+
+  // Accumulated improved text — lives outside improveState so the Tauri event
+  // listener always captures the latest value via a local variable.
+  let improveAccumulated = $state('');
+
+  /** @type {import('@tauri-apps/api/event').UnlistenFn | null} */
+  let refineUnlisten = null;
+
+  // Accumulated refined hunk text — same pattern as improveAccumulated.
+  let refineAccumulated = '';
+
+  async function handleImproveStart(instruction) {
+    if (!activeNote) return;
+    improveAccumulated = '';
+    improveState = { status: 'streaming', instruction, improvedText: '', hunks: [], originalContent: editorContent, acceptedIndices: [], rejectedIndices: [] };
+
+    const unlistenP = listen('note:improve-token', (event) => {
+      const token = /** @type {string} */ (event.payload);
+      improveAccumulated += token;
+      improveState = { ...improveState, improvedText: improveAccumulated };
+    });
+    const unlisten = await unlistenP;
+    improveUnlisten = unlisten;
+
+    try {
+      const model = await invoke('get_setting', { key: 'chat_model' }) || 'llama3.2';
+      const temperature = await invoke('get_setting', { key: 'chat_temperature' });
+      const topP = await invoke('get_setting', { key: 'chat_top_p' });
+      const topK = await invoke('get_setting', { key: 'chat_top_k' });
+      const repeatPenalty = await invoke('get_setting', { key: 'chat_repeat_penalty' });
+      const numCtx = await invoke('get_setting', { key: 'chat_num_ctx' });
+      await invoke('suggest_note_improvement', {
+        model, noteContent: editorContent, instruction,
+        temperature: temperature !== '' ? Number(temperature) : 0.8,
+        topP: topP !== '' ? Number(topP) : 0.9,
+        topK: topK !== '' ? Number(topK) : 40,
+        repeatPenalty: repeatPenalty !== '' ? Number(repeatPenalty) : 1.1,
+        numCtx: numCtx !== '' ? Number(numCtx) : 8192,
+      });
+      unlisten();
+      improveUnlisten = null;
+      const hunks = computeDiff(improveState.originalContent, improveAccumulated);
+      improveState = { ...improveState, status: 'diff', hunks, acceptedIndices: [], rejectedIndices: [] };
+    } catch (e) {
+      unlisten();
+      improveUnlisten = null;
+      showError(e);
+      improveState = { status: 'idle', instruction: '', improvedText: '', hunks: [], originalContent: '', acceptedIndices: [], rejectedIndices: [] };
+    }
+  }
+
+  function allChangedIndices(hunks) {
+    return hunks
+      .map((h, i) => h.type !== 'unchanged' ? i : -1)
+      .filter(i => i !== -1);
+  }
+
+  function pairedHunkIndex(hunks, index) {
+    const hunk = hunks[index];
+    if (!hunk || hunk.type === 'unchanged') return -1;
+    if (hunk.type === 'remove') {
+      for (let i = index + 1; i < hunks.length; i++) {
+        if (hunks[i].type !== 'unchanged') return hunks[i].type === 'add' ? i : -1;
+      }
+    } else {
+      for (let i = index - 1; i >= 0; i--) {
+        if (hunks[i].type !== 'unchanged') return hunks[i].type === 'remove' ? i : -1;
+      }
+    }
+    return -1;
+  }
+
+  function applyAndClose(state) {
+    const { hunks, originalContent, improvedText, acceptedIndices: accepted, rejectedIndices } = state;
+    const allChanged = allChangedIndices(hunks);
+    const undecided = allChanged.filter(i => !accepted.includes(i) && !rejectedIndices.includes(i));
+    const finalAccepted = new Set([...accepted, ...undecided]);
+    if (finalAccepted.size > 0) {
+      if (finalAccepted.size === allChanged.length && rejectedIndices.length === 0 && accepted.length === 0) {
+        editorContent = improvedText;
+      } else {
+        editorContent = applyAcceptedHunks(hunks, finalAccepted, originalContent, improvedText);
+      }
+      markDirty();
+    }
+    improveState = { status: 'idle', instruction: '', improvedText: '', hunks: [], originalContent: '', acceptedIndices: [], rejectedIndices: [] };
+  }
+
+  function handleImproveAcceptAll() {
+    applyAndClose(improveState);
+  }
+
+  function handleImproveRejectAll() {
+    improveState = { status: 'idle', instruction: '', improvedText: '', hunks: [], originalContent: '', acceptedIndices: [], rejectedIndices: [] };
+  }
+
+  function handleImproveAcceptHunk(hunkIndex) {
+    const hunk = improveState.hunks[hunkIndex];
+    if (!hunk || hunk.type === 'unchanged') return;
+    if (improveState.acceptedIndices.includes(hunkIndex)) return;
+    const pair = pairedHunkIndex(improveState.hunks, hunkIndex);
+    const indices = pair !== -1 && !improveState.acceptedIndices.includes(pair) && !improveState.rejectedIndices.includes(pair)
+      ? [hunkIndex, pair] : [hunkIndex];
+    const newAccepted = [...improveState.acceptedIndices, ...indices];
+    const allChanged = allChangedIndices(improveState.hunks);
+    const allDecided = allChanged.every(i => newAccepted.includes(i) || improveState.rejectedIndices.includes(i));
+    if (allDecided) {
+      applyAndClose({ ...improveState, acceptedIndices: newAccepted });
+    } else {
+      improveState = { ...improveState, acceptedIndices: newAccepted };
+    }
+  }
+
+  function handleImproveRejectHunk(hunkIndex) {
+    const hunk = improveState.hunks[hunkIndex];
+    if (!hunk || hunk.type === 'unchanged') return;
+    if (improveState.rejectedIndices.includes(hunkIndex)) return;
+    const pair = pairedHunkIndex(improveState.hunks, hunkIndex);
+    const indices = pair !== -1 && !improveState.rejectedIndices.includes(pair) && !improveState.acceptedIndices.includes(pair)
+      ? [hunkIndex, pair] : [hunkIndex];
+    const newRejected = [...improveState.rejectedIndices, ...indices];
+    const allChanged = allChangedIndices(improveState.hunks);
+    const allDecided = allChanged.every(i => improveState.acceptedIndices.includes(i) || newRejected.includes(i));
+    if (allDecided) {
+      applyAndClose({ ...improveState, rejectedIndices: newRejected });
+    } else {
+      improveState = { ...improveState, rejectedIndices: newRejected };
+    }
+  }
+
+  function startImprove() {
+    if (improveState.status !== 'idle') return;
+    improveState = { ...improveState, status: 'prompt' };
+  }
+
+  function handleRefineHunk(hunkIndex, x, y) {
+    refineState = { status: 'prompt', hunkIndex, x, y };
+  }
+
+  function handleRefineCancel() {
+    if (refineUnlisten) { refineUnlisten(); refineUnlisten = null; }
+    refineState = { status: 'idle', hunkIndex: null, x: 0, y: 0 };
+  }
+
+  async function handleRefineSend(instruction) {
+    const { hunkIndex } = refineState;
+    const hunks = improveState.hunks;
+    const hunk = hunks[hunkIndex];
+    if (!hunk) return;
+
+    // Determine what text to send to the LLM.
+    // Prefer the original (remove) lines so the LLM works on the pre-improve text.
+    // Fall back to the add lines for pure additions.
+    let hunkContent;
+    if (hunk.type === 'add') {
+      const removePair = pairedHunkIndex(hunks, hunkIndex);
+      hunkContent = (removePair !== -1 ? hunks[removePair].lines : hunk.lines).join('\n');
+    } else {
+      hunkContent = hunk.lines.join('\n');
+    }
+
+    refineAccumulated = '';
+    refineState = { ...refineState, status: 'streaming' };
+
+    const unlistenP = listen('note:refine-hunk-token', (event) => {
+      refineAccumulated += /** @type {string} */ (event.payload);
+    });
+    const unlisten = await unlistenP;
+    refineUnlisten = unlisten;
+
+    try {
+      const model = await invoke('get_setting', { key: 'chat_model' }) || 'llama3.2';
+      const temperature = await invoke('get_setting', { key: 'chat_temperature' });
+      const topP = await invoke('get_setting', { key: 'chat_top_p' });
+      const topK = await invoke('get_setting', { key: 'chat_top_k' });
+      const repeatPenalty = await invoke('get_setting', { key: 'chat_repeat_penalty' });
+      const numCtx = await invoke('get_setting', { key: 'chat_num_ctx' });
+      await invoke('suggest_hunk_refinement', {
+        model, hunkContent, instruction,
+        temperature: temperature !== '' ? Number(temperature) : 0.8,
+        topP: topP !== '' ? Number(topP) : 0.9,
+        topK: topK !== '' ? Number(topK) : 40,
+        repeatPenalty: repeatPenalty !== '' ? Number(repeatPenalty) : 1.1,
+        numCtx: numCtx !== '' ? Number(numCtx) : 8192,
+      });
+      unlisten();
+      refineUnlisten = null;
+
+      // Find the add hunk to replace (either the clicked hunk if it's an add,
+      // or the paired add if the clicked hunk is a remove).
+      const addIndex = hunk.type === 'add' ? hunkIndex : pairedHunkIndex(hunks, hunkIndex);
+      if (addIndex !== -1) {
+        const newHunks = hunks.map((h, i) =>
+          i === addIndex ? { ...h, lines: refineAccumulated.split('\n') } : h
+        );
+        improveState = { ...improveState, hunks: newHunks };
+      }
+    } catch (e) {
+      unlisten();
+      refineUnlisten = null;
+      showError(e);
+    }
+
+    refineState = { status: 'idle', hunkIndex: null, x: 0, y: 0 };
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────────────
@@ -520,6 +740,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   function openNote(note) {
     if (isDirty && activeNote && activeNote.id !== note.id) saveNote();
+    enhanceStateCancelIfDiff();
     searchOpen = false;
     activeNote = note;
     editorTitle = note.title;
@@ -585,6 +806,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   }
 
   async function closeNote() {
+    if (improveState.status !== 'idle') enhanceStateCancelIfDiff();
     if (isDirty) await saveNote();
     tabs = tabs.map(t => t.id === activeTabId ? { ...t, noteId: null, label: 'New Tab' } : t);
     activeNote = null;
@@ -596,8 +818,20 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     noteBacklinks = [];
   }
 
+  function enhanceStateCancelIfDiff() {
+    if (improveState.status === 'diff' || improveState.status === 'prompt' || improveState.status === 'streaming') {
+      if (improveUnlisten) { improveUnlisten(); improveUnlisten = null; }
+      improveState = { status: 'idle', instruction: '', improvedText: '', hunks: [], originalContent: '', acceptedIndices: [], rejectedIndices: [] };
+    }
+    if (refineState.status !== 'idle') {
+      if (refineUnlisten) { refineUnlisten(); refineUnlisten = null; }
+      refineState = { status: 'idle', hunkIndex: null, x: 0, y: 0 };
+    }
+  }
+
   async function activateTab(id) {
     if (activeTabId === id) return;
+    enhanceStateCancelIfDiff();
     if (isDirty) await saveNote();
     activeTabId = id;
     const tab = tabs.find(t => t.id === id);
@@ -1377,6 +1611,18 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           {folderHasProperties}
           {propertiesReady}
           bind:editorTextareaEl
+          {improveState}
+          onStartImprove={startImprove}
+          onImproveSend={handleImproveStart}
+          onImproveCancel={() => (improveState = { status: 'idle', instruction: '', improvedText: '', hunks: [], originalContent: '', acceptedIndices: [], rejectedIndices: [] })}
+          onImproveAcceptAll={handleImproveAcceptAll}
+          onImproveRejectAll={handleImproveRejectAll}
+          onImproveAcceptHunk={handleImproveAcceptHunk}
+          onImproveRejectHunk={handleImproveRejectHunk}
+          {refineState}
+          onRefineHunk={handleRefineHunk}
+          onRefineSend={handleRefineSend}
+          onRefineCancel={handleRefineCancel}
           onMarkDirty={markDirty}
           onSave={saveNote}
           onCloseNote={closeNote}

@@ -2,6 +2,8 @@
 <script>
   import { marked } from 'marked';
   import NoteProperties from './NoteProperties.svelte';
+  import DiffView from './DiffView.svelte';
+  import ImprovePopover from './ImprovePopover.svelte';
 
   let {
     activeNote = null,
@@ -21,6 +23,22 @@
 
     // Output bindings
     editorTextareaEl = $bindable(null),
+
+    // Improve state
+    improveState = { status: 'idle' },
+    onStartImprove,
+    onImproveSend,
+    onImproveCancel,
+    onImproveAcceptAll,
+    onImproveRejectAll,
+    onImproveAcceptHunk,
+    onImproveRejectHunk,
+
+    // Refine hunk state
+    refineState = { status: 'idle' },
+    onRefineHunk,
+    onRefineSend,
+    onRefineCancel,
 
     // Events
     onMarkDirty,
@@ -88,6 +106,9 @@
     {#if activeNote.folder_id}
       <button class="graph-toggle" onclick={() => onRevealFolder?.(activeNote.folder_id)} title="Reveal in folder panel" aria-label="Reveal in folder panel">Reveal</button>
     {/if}
+    <button class="graph-toggle" aria-label="Suggest improvements" title="Suggest improvements" onclick={onStartImprove} disabled={improveState.status !== 'idle' || !editorContent}>
+      Improve
+    </button>
     <button class="graph-toggle" aria-label={activeTab?.readMode ? 'Switch to edit mode' : 'Switch to read mode'} onclick={onToggleReadMode}>
       {activeTab?.readMode ? 'Edit' : 'Read'}
     </button>
@@ -115,7 +136,23 @@
 {/if}
 
 {#if propertiesReady}
-  {#if activeTab?.readMode}
+  {#if improveState.status === 'diff'}
+    <DiffView
+      hunks={improveState.hunks}
+      instruction={improveState.instruction}
+      onAcceptAll={onImproveAcceptAll}
+      onRejectAll={onImproveRejectAll}
+      onAcceptHunk={onImproveAcceptHunk}
+      onRejectHunk={onImproveRejectHunk}
+      {onRefineHunk}
+      rejectedIndices={improveState.rejectedIndices}
+      acceptedIndices={improveState.acceptedIndices}
+    />
+  {:else if improveState.status === 'streaming'}
+    <div class="content-area" style="overflow-y: auto; white-space: pre-wrap; font-family: var(--mono); padding: 24px;">
+      {improveState.improvedText || 'Thinking\u2026'}
+    </div>
+  {:else if activeTab?.readMode}
     <div class="content-area read-mode-content">{@html marked.parse(editorContent || '')}</div>
   {:else}
     <textarea
@@ -127,6 +164,25 @@
       placeholder="Write your note…"
     ></textarea>
   {/if}
+{/if}
+
+{#if improveState.status === 'prompt'}
+  <ImprovePopover
+    x={200}
+    y={100}
+    onSend={onImproveSend}
+    onCancel={onImproveCancel}
+  />
+{/if}
+
+{#if refineState.status === 'prompt'}
+  <ImprovePopover
+    x={refineState.x}
+    y={refineState.y}
+    label="How should this section be refined?"
+    onSend={onRefineSend}
+    onCancel={onRefineCancel}
+  />
 {/if}
 
 {#if noteLinks.length > 0 || noteBacklinks.length > 0 || unlinkedMentions.length > 0}

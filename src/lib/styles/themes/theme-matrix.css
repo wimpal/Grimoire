@@ -12,6 +12,11 @@
   --accent:     #00ff41;
   --accent-bg:  rgba(0, 255, 65, 0.1);
   --danger:     #ff4444;
+  --diff-add-bg: rgba(0, 255, 65, 0.1);
+  --diff-add-border: rgba(0, 255, 65, 0.22);
+  --diff-remove-bg: rgba(255, 68, 68, 0.1);
+  --diff-remove-border: rgba(255, 68, 68, 0.22);
+  --diff-unchanged-bg: transparent;
   color-scheme: dark;
 
   --sans: 'VT323', ui-monospace, 'Courier New', monospace;

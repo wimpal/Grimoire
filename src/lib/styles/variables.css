@@ -9,6 +9,12 @@
   --accent-bg: rgba(155, 32, 32, 0.08);
   --danger: #c0392b;
 
+  --diff-add-bg: rgba(40, 167, 69, 0.12);
+  --diff-add-border: rgba(40, 167, 69, 0.28);
+  --diff-remove-bg: rgba(220, 53, 69, 0.12);
+  --diff-remove-border: rgba(220, 53, 69, 0.28);
+  --diff-unchanged-bg: transparent;
+
   --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
   --mono: ui-monospace, Consolas, monospace;
 
@@ -28,5 +34,10 @@
     --accent: #c0443a;
     --accent-bg: rgba(192, 68, 58, 0.15);
     --danger: #e06060;
+    --diff-add-bg: rgba(40, 167, 69, 0.15);
+    --diff-add-border: rgba(40, 167, 69, 0.3);
+    --diff-remove-bg: rgba(220, 53, 69, 0.15);
+    --diff-remove-border: rgba(220, 53, 69, 0.3);
+    --diff-unchanged-bg: transparent;
   }
 }
