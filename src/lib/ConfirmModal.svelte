@@ -37,13 +37,13 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   function handleKeydown(e) {
     if (e.key === 'Escape') onCancel();
-    if (e.key === 'Enter') onConfirm();
+    // Enter is handled natively by whichever button has focus — no backdrop handler needed.
   }
 
-  // Focus the cancel button by default so Enter doesn't immediately confirm.
-  let cancelBtn = $state(null);
+  // Focus the confirm (destructive) button by default so Enter triggers deletion.
+  let confirmBtn = $state(null);
   $effect(() => {
-    if (cancelBtn) cancelBtn.focus();
+    if (confirmBtn) confirmBtn.focus();
   });
 </script>
 
@@ -61,8 +61,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     {/if}
 
     <div class="modal-actions">
-      <button class="btn-confirm" onclick={onConfirm}>{confirmLabel}</button>
-      <button class="btn-cancel" bind:this={cancelBtn} onclick={onCancel}>Cancel</button>
+      <button class="btn-confirm" bind:this={confirmBtn} onclick={onConfirm}>{confirmLabel}</button>
+      <button class="btn-cancel" onclick={onCancel}>Cancel</button>
     </div>
   </div>
 </div>

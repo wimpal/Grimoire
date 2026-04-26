@@ -2,6 +2,8 @@
 
 A local-first note-taking app with built-in LLM assistance. Everything runs on your machine — no internet required, no data leaves your device.
 
+Your notes work with the LLM immediately — no configuration, no API keys, no cloud accounts, and nothing leaves your machine. Open the app, write a note, ask a question. That's it.
+
 ## Stack
 
 | Layer | Technology |
