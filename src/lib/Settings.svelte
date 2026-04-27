@@ -26,6 +26,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   import SettingsPrivacy from './settings/SettingsPrivacy.svelte';
   import SettingsKeybinds from './settings/SettingsKeybinds.svelte';
   import SettingsDeveloper from './settings/SettingsDeveloper.svelte';
+  import SettingsWikipedia from './settings/SettingsWikipedia.svelte';
 
   let {
     onClose,
@@ -46,6 +47,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     onDevNativeContextMenuChange = () => {},
     llmEnabled = false,
     onHardwareChange = () => {},
+    wikipediaEnabled = false,
+    onWikipediaEnabledChange = () => {},
   } = $props();
 
   const isDev = import.meta.env.DEV;
@@ -59,6 +62,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     { id: 'security',   label: 'Security' },
     { id: 'privacy',    label: 'Privacy' },
     { id: 'data',       label: 'Data' },
+    { id: 'wikipedia',  label: 'Wikipedia' },
     { id: 'keybinds',   label: 'Keybinds' },
     ...(isDev ? [{ id: 'developer', label: 'Developer' }] : []),
   ]);
@@ -99,6 +103,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         <SettingsData />
       {:else if activeSection === 'privacy'}
         <SettingsPrivacy />
+      {:else if activeSection === 'wikipedia'}
+        <SettingsWikipedia {wikipediaEnabled} {onWikipediaEnabledChange} />
       {:else if activeSection === 'keybinds'}
         <SettingsKeybinds />
       {:else if activeSection === 'developer'}

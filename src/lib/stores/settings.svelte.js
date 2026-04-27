@@ -16,6 +16,10 @@ export function createSettings() {
   let llmForceEnabled = $state(false);
   const llmEnabled = $derived(hwCapability === 'full' || llmForceEnabled);
 
+  // Wikipedia local knowledge source toggle.
+  // Loaded from the 'wikipedia_enabled' setting in SQLite on startup.
+  let wikipediaEnabled = $state(false);
+
   // Persist preferences to localStorage and apply theme to the DOM.
   $effect(() => {
     localStorage.setItem('keepModelInMemory', String(keepModelInMemory));
@@ -64,5 +68,7 @@ export function createSettings() {
     get llmForceEnabled() { return llmForceEnabled; },
     set llmForceEnabled(v) { llmForceEnabled = v; },
     get llmEnabled() { return llmEnabled; },
+    get wikipediaEnabled() { return wikipediaEnabled; },
+    set wikipediaEnabled(v) { wikipediaEnabled = v; },
   };
 }

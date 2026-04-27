@@ -28,7 +28,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   // pendingInsert: { text: string, seq: number } — injected quote from the editor keybind.
   // keepInMemory: when true, keep_alive: -1 is sent so Ollama never unloads the model.
   // llmEnabled: false disables the chat UI and shows a hardware warning banner.
-  let { activeNote = null, pendingInsert = null, keepInMemory = false, llmEnabled = true, onClose = null, onContextMenu = null, onInsertIntoNote = null, activeView = null, activeViewFolderId = null, activeViewLabel = '', activeViewFilters = {} } = $props();
+  let { activeNote = null, pendingInsert = null, keepInMemory = false, llmEnabled = true, wikipediaEnabled = false, onClose = null, onContextMenu = null, onInsertIntoNote = null, activeView = null, activeViewFolderId = null, activeViewLabel = '', activeViewFilters = {} } = $props();
 
   // ── State ──────────────────────────────────────────────────────────────────
 
@@ -56,6 +56,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   let isLoading = $state(false);
   let error = $state('');
   let useNotes = $state(true);
+  let useWiki = $state(true);
   let useViewContext = $state(true);
   let useFeatureGuide = $state(true);
 
@@ -107,6 +108,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
   // Titles of notes injected as context for the most recent message.
   // Empty when notes search is off, failed, or returned nothing.
   let sourcesUsed = $state([]);
+  let wikiSourcesUsed = $state([]);
   let notesError = $state('');
 
   // Reference to the scrollable messages container so we can auto-scroll.
@@ -310,21 +312,21 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     // ── 2. RAG context ───────────────────────────────────────────────────────
     // Always search even when a note is open — the question may be relevant
     // to other notes beyond the one currently being edited.
+
+    // Build the RAG query from recent user messages (hoisted so wikipedia can reuse it).
+    const recentUserMessages = history
+      .filter(m => m.role === 'user')
+      .slice(-2)
+      .map(m => m.content)
+      .join(' ');
+    const ragQuery = recentUserMessages
+      .replace(/what (have i|did i|do i have) (written?|noted?|said?) (about|on|regarding)\s*/gi, '')
+      .replace(/tell me (about|what i (wrote|know|noted) about)\s*/gi, '')
+      .replace(/what (are|is) my (notes?|thoughts?) (on|about)\s*/gi, '')
+      .replace(/show me (my notes? on|what i wrote about)\s*/gi, '')
+      .trim() || recentUserMessages;
+
     if (useNotes) {
-      // Use the current message plus the previous user turn for the RAG query.
-      // Strip meta-question framing ("what have I written about X?", "tell me about X")
-      // so the semantic search matches topic content rather than the question phrasing.
-      const recentUserMessages = history
-        .filter(m => m.role === 'user')
-        .slice(-2)
-        .map(m => m.content)
-        .join(' ');
-      const ragQuery = recentUserMessages
-        .replace(/what (have i|did i|do i have) (written?|noted?|said?) (about|on|regarding)\s*/gi, '')
-        .replace(/tell me (about|what i (wrote|know|noted) about)\s*/gi, '')
-        .replace(/what (are|is) my (notes?|thoughts?) (on|about)\s*/gi, '')
-        .replace(/show me (my notes? on|what i wrote about)\s*/gi, '')
-        .trim() || recentUserMessages;
       let matches = [];
       try {
         matches = await invoke('search_notes', { query: ragQuery });
@@ -339,20 +341,62 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         }
         sourcesUsed = Object.keys(byTitle);
         const context = Object.entries(byTitle)
-          .map(([title, excerpts]) => `NOTE: "${title}"\nCONTENT:\n${excerpts.join('\n')}\nEND NOTE`)
+          .map(([title, excerpts]) => `[Note: "${title}"]\n${excerpts.join('\n')}`)
           .join('\n\n');
-        systemParts.push(`SEARCH RESULTS:\n${context}`);
+        systemParts.push(`USER NOTES:\n${context}`);
+      }
+    }
+
+    // ── 3. Wikipedia RAG context ─────────────────────────────────────────────
+    if (useWiki && wikipediaEnabled) {
+      let wikiMatches = [];
+      try {
+        wikiMatches = await invoke('search_wikipedia', { query: ragQuery });
+      } catch (_) {
+        // Wikipedia search is best-effort — don't surface errors in the UI.
+      }
+      if (wikiMatches.length > 0) {
+        wikiSourcesUsed = wikiMatches.map(m => m.title);
+        const wikiContext = wikiMatches
+          .map(m => `[Wikipedia: "${m.title}"]\n${m.excerpts.join('\n')}`)
+          .join('\n\n');
+        systemParts.push(`WIKIPEDIA ARTICLES:\n${wikiContext}`);
       }
     }
 
     // ── Assemble system message ──────────────────────────────────────────────
     if (systemParts.length > 0) {
-      const preamble =
+      const hasWikiContext = wikiSourcesUsed.length > 0;
+      const hasNotesContext = sourcesUsed.length > 0;
+      const hasAnyContext = hasNotesContext || hasWikiContext;
+
+      // Build a strict source-priority preamble that varies based on what was actually retrieved.
+      let preamble =
         `You are a personal knowledge assistant embedded in Grimoire, a local note-taking app.\n` +
-        `The user's notes are stored in the app. When the user asks "what have I written about X" or ` +
-        `"tell me about X", they are asking you to retrieve and summarise information from their own notes.\n` +
-        `You also have access to a feature guide that documents Grimoire's keyboard shortcuts and features.\n` +
-        `You do NOT have general world knowledge to draw on — every answer must come only from the notes or feature guide provided below. Never guess or use outside knowledge.`;
+        `You also have access to a feature guide that documents Grimoire's keyboard shortcuts and features.\n`;
+
+      if (hasNotesContext && hasWikiContext) {
+        preamble +=
+          `You have been given the user's notes AND Wikipedia articles for this question.\n` +
+          `STRICT SOURCE PRIORITY — follow this order without exception:\n` +
+          `  1. Answer first from the user's notes if they contain genuinely relevant information.\n` +
+          `  2. Then draw on the Wikipedia articles provided.\n` +
+          `  3. Only use your own general knowledge to fill gaps that neither notes nor Wikipedia cover. Do NOT lead with general knowledge when provided sources exist.`;
+      } else if (hasWikiContext) {
+        preamble +=
+          `You have been given Wikipedia articles for this question. The user's notes were not relevant.\n` +
+          `STRICT SOURCE PRIORITY — follow this order without exception:\n` +
+          `  1. Answer from the Wikipedia articles provided. They are your primary source.\n` +
+          `  2. Only use your own general knowledge to fill gaps the Wikipedia articles do not cover. Do NOT lead with general knowledge when Wikipedia articles are available.`;
+      } else if (hasNotesContext) {
+        preamble +=
+          `You have been given the user's notes for this question.\n` +
+          `STRICT SOURCE PRIORITY — follow this order without exception:\n` +
+          `  1. Answer from the user's notes where they are genuinely relevant.\n` +
+          `  2. Only use your own general knowledge to fill gaps the notes do not cover.`;
+      } else {
+        preamble += `No relevant notes or Wikipedia articles were found for this question. Answer from your own general knowledge.`;
+      }
 
       let content;
       if (verbosity === 'caveman') {
@@ -360,12 +404,12 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           `${preamble}\n\n` +
           systemParts.join('\n\n') +
           `\n\nINSTRUCTIONS:\n` +
-          `- Use ONLY the notes above.\n` +
-          `- Read the note CONTENT and compress the key facts into telegraphic bullet points — no full sentences, no filler words, no articles.\n` +
-          `- Example good answer: "• metabolic process • microbes convert sugars → acids/gas/alcohol • lactic: yoghurt, kimchi • alcoholic: beer, wine → ethanol+CO2"\n` +
-          `- Never just list the note title. Always give the actual content.\n` +
-          `- If notes contain nothing relevant: "not in notes".\n` +
-          `- No speculation. No "According to". Ignore [[ ]] and **.`;
+          `- Compress the key facts into telegraphic bullet points — no full sentences, no filler words.\n` +
+          `- Example: "• metabolic process • microbes convert sugars → acids/gas/alcohol • lactic: yoghurt, kimchi"\n` +
+          `- Only use sources that are directly relevant to the question. Ignore off-topic sources.\n` +
+          `- Prefix each bullet with its source: "note:" for user notes, "wiki:" for Wikipedia, "general:" for your own knowledge.\n` +
+          `- Wrap any code or diagrams in triple-backtick code blocks.\n` +
+          `- Ignore [[ ]] and **.`;
       } else {
         let styleInstruction = '';
         if (verbosity === 'thorough') {
@@ -373,15 +417,18 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
         }
         content =
           `${preamble}\n\n` +
-          `Below are excerpts from the user's notes that are relevant to their question.\n` +
-          `Each result is a note with its title and content. Read the content of each note carefully.\n\n` +
           systemParts.join('\n\n') +
           `\n\nINSTRUCTIONS:\n` +
-          `1. Answer the user's question using ONLY the information from the notes above.\n` +
-          `2. If a note contains information that answers the question, use that information in your answer.\n` +
-          `3. If the notes do NOT contain information to answer the question, say so directly. Do not speculate or make indirect connections.\n` +
-          `4. Quote or paraphrase from the note content when possible.\n` +
-          `5. Ignore any formatting like brackets [[ ]] or asterisks **. Focus on the text.` +
+          `1. RELEVANCE GATE — Before using any source, ask: does this source directly answer the question? If not, discard it completely. Do not mention discarded sources. A source that merely shares vocabulary with the question is NOT relevant.\n` +
+          `2. Answer in natural prose. Do not output section labels, headers, or structural markers like [Note: …] or [Wikipedia: …].\n` +
+          `3. Follow the source priority above strictly. Do not open with general knowledge if provided sources cover the topic.\n` +
+          `4. Wrap all code samples, command examples, ASCII art, and diagrams in triple-backtick fenced code blocks.\n` +
+          `5. Every sentence drawn from a source MUST be attributed inline — no exceptions:\n` +
+          `   - User notes: begin with "In your note on X, …" or "Your note on X explains that …" (use the exact note title)\n` +
+          `   - Wikipedia: begin with "According to Wikipedia's article on X, …" or "Wikipedia (X) explains that …" (use the exact article title)\n` +
+          `   - General knowledge (only as fallback): begin with "Based on general knowledge, …"\n` +
+          `   - When switching sources mid-answer, explicitly signal the transition.\n` +
+          `6. Never fabricate a source attribution. Ignore formatting like [[ ]] or **.` +
           styleInstruction;
       }
       payload = [{ role: 'system', content }, ...history];
@@ -416,6 +463,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     isLoading = true;
     error = '';
     sourcesUsed = [];
+    wikiSourcesUsed = [];
     notesError = '';
 
     // Load inference params from settings so changes take effect immediately.
@@ -471,6 +519,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     isLoading = true;
     error = '';
     sourcesUsed = [];
+    wikiSourcesUsed = [];
     notesError = '';
 
     // Load inference params from settings (same as send()).
@@ -552,6 +601,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   let debugQuery = $state('');
   let debugResults = $state([]);
+  let debugWikiResults = $state([]);
   let debugOpen = $state(false);
 
   async function runDebugSearch() {
@@ -559,11 +609,15 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     if (!q) return;
     try {
       debugResults = await invoke('debug_search', { query: q });
-      debugOpen = true;
     } catch (e) {
       debugResults = [{ title: 'Error', excerpt: String(e), distance: -1 }];
-      debugOpen = true;
     }
+    try {
+      debugWikiResults = await invoke('debug_search_wikipedia', { query: q });
+    } catch (e) {
+      debugWikiResults = [{ title: 'Error', excerpt: String(e), distance: -1 }];
+    }
+    debugOpen = true;
   }
 
   function handleKeydown(e) {
@@ -572,6 +626,40 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       e.preventDefault();
       send();
     }
+  }
+
+  // ── Inline Markdown renderer ───────────────────────────────────────────────
+  // Handles the subset the LLM commonly emits: fenced code blocks, inline code,
+  // **bold**, *italic*, and paragraph breaks. No external dependency.
+  function renderMarkdown(text) {
+    // Escape HTML in a plain text segment to prevent XSS.
+    function esc(s) {
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    // Split on fenced code blocks first so we never process their contents.
+    const parts = text.split(/(```[\s\S]*?```)/g);
+    return parts.map((part, i) => {
+      if (i % 2 === 1) {
+        // Code block — extract optional language tag and content.
+        const m = part.match(/^```(\w*)\n?([\s\S]*?)```$/);
+        const code = m ? m[2] : part.slice(3, -3);
+        const lang = m && m[1] ? ` class="language-${esc(m[1])}"` : '';
+        return `<pre><code${lang}>${esc(code)}</code></pre>`;
+      }
+      // Plain text segment — apply inline rules then convert newlines.
+      return esc(part)
+        // Inline code (must come before bold/italic so backticks aren't double-processed).
+        .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+        // Bold.
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        // Italic (single *, not double).
+        .replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>')
+        // Paragraph breaks (two+ newlines) → double br.
+        .replace(/\n{2,}/g, '<br><br>')
+        // Single newlines → br.
+        .replace(/\n/g, '<br>');
+    }).join('');
   }
 </script>
 
@@ -596,6 +684,10 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       <input type="checkbox" bind:checked={useNotes} />
       Use notes
     </label>
+    <label class="notes-toggle" title="Search the indexed Wikipedia catalogue and inject relevant articles as context" class:disabled={!wikipediaEnabled}>
+      <input type="checkbox" bind:checked={useWiki} disabled={!wikipediaEnabled} />
+      Use wiki
+    </label>
     <label class="notes-toggle view-context-toggle" title="Include the current board or table view state as context for the LLM" class:disabled={!activeView}>
       <input type="checkbox" bind:checked={useViewContext} disabled={!activeView} />
       Use view
@@ -613,7 +705,11 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     {#each messages as msg, i (i)}
       {#if msg.role !== 'assistant' || msg.content !== ''}
         <div class="chat-message {msg.role}" role="listitem" oncontextmenu={(e) => handleMessageContextMenu(e, msg, i)}>
-          <p>{msg.content}</p>
+          {#if msg.role === 'assistant'}
+            <div class="msg-body">{@html renderMarkdown(msg.content)}</div>
+          {:else}
+            <p>{msg.content}</p>
+          {/if}
         </div>
       {/if}
     {:else}
@@ -635,15 +731,20 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     <p class="chat-error">{error}</p>
   {/if}
 
-  {#if sourcesUsed.length > 0 && !isLoading}
+  {#if sourcesUsed.length > 0 || wikiSourcesUsed.length > 0}
+    {#if !isLoading}
     <details class="chat-sources">
-      <summary class="chat-sources-summary">Sources ({sourcesUsed.length})</summary>
+      <summary class="chat-sources-summary">Sources ({sourcesUsed.length + wikiSourcesUsed.length})</summary>
       <div class="chat-sources-pills">
         {#each sourcesUsed as title}
           <span class="chat-source-pill">{title}</span>
         {/each}
+        {#each wikiSourcesUsed as title}
+          <span class="chat-source-pill chat-source-wiki">W · {title}</span>
+        {/each}
       </div>
     </details>
+    {/if}
   {/if}
 
   {#if import.meta.env.DEV}
@@ -654,11 +755,27 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       <button onclick={runDebugSearch}>Search</button>
     </div>
     {#if debugResults.length > 0}
+      <p class="debug-section-label">Notes</p>
       <table class="debug-table">
         <thead><tr><th>dist</th><th>title</th><th>excerpt</th></tr></thead>
         <tbody>
           {#each debugResults as r}
             <tr class:debug-pass={r.distance <= 1.1} class:debug-fail={r.distance > 1.1}>
+              <td>{r.distance.toFixed(3)}</td>
+              <td>{r.title}</td>
+              <td>{r.excerpt}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+    {#if debugWikiResults.length > 0}
+      <p class="debug-section-label">Wikipedia</p>
+      <table class="debug-table">
+        <thead><tr><th>dist</th><th>title</th><th>excerpt</th></tr></thead>
+        <tbody>
+          {#each debugWikiResults as r}
+            <tr class:debug-pass={r.distance <= 1.35} class:debug-fail={r.distance > 1.35}>
               <td>{r.distance.toFixed(3)}</td>
               <td>{r.title}</td>
               <td>{r.excerpt}</td>

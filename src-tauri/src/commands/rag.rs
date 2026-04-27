@@ -29,6 +29,11 @@ async fn get_embedding_model(db: &SqlitePool) -> String {
         .unwrap_or_else(|| "nomic-embed-text".to_string())
 }
 
+/// Public alias used by `wikipedia.rs` to read the configured embedding model.
+pub(crate) async fn get_embedding_model_pub(db: &SqlitePool) -> String {
+    get_embedding_model(db).await
+}
+
 // ---------------------------------------------------------------------------
 // RAG commands (vector index + semantic search)
 // ---------------------------------------------------------------------------
@@ -394,6 +399,19 @@ pub async fn debug_search(
     let model = get_embedding_model(pool.inner()).await;
     let embedding = embed_query(&query, &model).await?;
     crate::vector::raw_search(&vdb.0, embedding, 10).await
+}
+
+/// Debug command: returns top Wikipedia search hits with raw distance scores, no filtering.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn debug_search_wikipedia(
+    pool: State<'_, SqlitePool>,
+    vdb: State<'_, crate::vector::VectorDb>,
+    query: String,
+) -> Result<Vec<crate::vector::RawMatch>, String> {
+    let model = get_embedding_model(pool.inner()).await;
+    let embedding = embed_query(&query, &model).await?;
+    crate::vector::raw_wikipedia_search(&vdb.0, embedding, 10).await
 }
 
 /// Insert a set of varied seed notes and index them all.

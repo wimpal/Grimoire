@@ -25,3 +25,6 @@ dist-ssr
 
 # GitHub-specific config and prompts
 .github
+
+# Vendored runtime DLLs (copied from vcpkg at dev setup time)
+src-tauri/vendor-dlls/

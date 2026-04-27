@@ -612,6 +612,10 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
       invoke('get_hardware_info')
         .then(hw => { settings.hwCapability = hw.capability; settings.llmForceEnabled = hw.llmForceEnabled; })
         .catch(() => {});
+
+      invoke('get_setting', { key: 'wikipedia_enabled' })
+        .then(v => { settings.wikipediaEnabled = v === 'true'; })
+        .catch(() => {});
     }
 
     await tick();
@@ -1593,7 +1597,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
           <Kanban folderId={activeTab.folderId} onOpenNote={(id) => openNoteById(id)} />
         </div>
       {:else if activeTab?.type === 'chat'}
-        <Chat activeNote={null} pendingInsert={null} keepInMemory={settings.keepModelInMemory} llmEnabled={settings.llmEnabled} onClose={() => closeTab(activeTabId)} onContextMenu={(x, y, items) => (ctxMenu = { x, y, items })} onInsertIntoNote={null} {activeView} {activeViewFolderId} {activeViewLabel} {activeViewFilters} />
+        <Chat activeNote={null} pendingInsert={null} keepInMemory={settings.keepModelInMemory} llmEnabled={settings.llmEnabled} wikipediaEnabled={settings.wikipediaEnabled} onClose={() => closeTab(activeTabId)} onContextMenu={(x, y, items) => (ctxMenu = { x, y, items })} onInsertIntoNote={null} {activeView} {activeViewFolderId} {activeViewLabel} {activeViewFilters} />
       {:else if activeNote}
         <NoteEditor
           {activeNote}
@@ -1651,7 +1655,7 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
 
   {#if layout.chatOpen && activeTab?.type !== 'chat'}
     <button class="panel-divider chat-divider" aria-label="Resize chat panel" class:dragging={layout.activeDrag?.panel === 'chat'} onmousedown={(e) => layout.startDrag('chat', e)}></button>
-    <Chat {activeNote} pendingInsert={chatInsert} keepInMemory={settings.keepModelInMemory} llmEnabled={settings.llmEnabled} onClose={() => (layout.chatOpen = false)} onContextMenu={(x, y, items) => (ctxMenu = { x, y, items })} onInsertIntoNote={activeNote ? insertIntoActiveNote : null} {activeView} {activeViewFolderId} {activeViewLabel} {activeViewFilters} />
+    <Chat {activeNote} pendingInsert={chatInsert} keepInMemory={settings.keepModelInMemory} llmEnabled={settings.llmEnabled} wikipediaEnabled={settings.wikipediaEnabled} onClose={() => (layout.chatOpen = false)} onContextMenu={(x, y, items) => (ctxMenu = { x, y, items })} onInsertIntoNote={activeNote ? insertIntoActiveNote : null} {activeView} {activeViewFolderId} {activeViewLabel} {activeViewFilters} />
   {/if}
 </div>
 
@@ -1683,6 +1687,8 @@ along with Grimoire. If not, see <https://www.gnu.org/licenses/>. -->
     onDevNativeContextMenuChange={(v) => (settings.devNativeContextMenu = v)}
     llmEnabled={settings.llmEnabled}
     onHardwareChange={(cap, force) => { settings.hwCapability = cap; settings.llmForceEnabled = force; }}
+    wikipediaEnabled={settings.wikipediaEnabled}
+    onWikipediaEnabledChange={(v) => (settings.wikipediaEnabled = v)}
   />
 {/if}
 

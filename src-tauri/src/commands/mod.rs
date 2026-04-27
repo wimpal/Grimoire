@@ -29,6 +29,7 @@ pub mod settings;
 pub mod tags;
 pub mod properties;
 pub mod templates;
+pub mod wikipedia;
 
 // Re-export all public command functions so lib.rs can keep using commands::create_note etc.
 pub use bookmarks::*;
@@ -42,6 +43,7 @@ pub use settings::*;
 pub use tags::*;
 pub use properties::*;
 pub use templates::*;
+pub use wikipedia::*;
 
 // ---------------------------------------------------------------------------
 // Shared structs

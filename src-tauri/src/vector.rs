@@ -193,15 +193,17 @@ pub async fn embed(text: &str, model: &str) -> Result<Vec<f32>, String> {
                 return Err("Empty embedding response from Ollama".to_string());
             }
 
-            // Sanity check: nomic-embed-text returns approximately unit-normalized
-            // vectors (norm ≈ 1.0). A near-zero norm means Ollama returned garbage
-            // from a crashed inference — treat it as an error and retry.
+            // Normalize to unit length before storing. Different Ollama versions and
+            // task prefixes (search_document:, search_query:) can return vectors with
+            // varying norms (observed: 1.0–20+). Normalizing here ensures consistent
+            // L2² distances in the range [0, 4] regardless of model or configuration.
             let norm: f32 = resp.embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
             if norm < 0.1 {
                 return Err(format!("Degenerate embedding vector (norm={norm:.4}) — Ollama inference likely crashed"));
             }
+            let normalized: Vec<f32> = resp.embedding.iter().map(|x| x / norm).collect();
 
-            Ok(resp.embedding)
+            Ok(normalized)
         }.await;
 
         match result {
@@ -216,6 +218,62 @@ pub async fn embed(text: &str, model: &str) -> Result<Vec<f32>, String> {
         }
     }
     Err(last_err)
+}
+
+/// Embed a batch of texts in a single Ollama request using `/api/embed`.
+/// 5–10× faster than calling `embed()` per-text: one HTTP round-trip per batch,
+/// model stays resident (`keep_alive=300`), no per-call eviction overhead.
+/// Returns one vector per input in the same order.
+pub async fn embed_batch(texts: &[String], model: &str) -> Result<Vec<Vec<f32>>, String> {
+    #[derive(Serialize)]
+    struct Req<'a> {
+        model: &'a str,
+        input: &'a [String],
+        keep_alive: i32,
+    }
+    #[derive(Deserialize)]
+    struct Resp {
+        embeddings: Vec<Vec<f32>>,
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+
+    let response = client
+        .post("http://localhost:11434/api/embed")
+        .json(&Req { model, input: texts, keep_alive: 300 })
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach Ollama (batch embed): {e}"))?;
+
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Could not read batch embed response: {e}"))?;
+
+    let resp: Resp = serde_json::from_str(&body)
+        .map_err(|e| format!("Unexpected batch embed response: {e}\nBody: {body}"))?;
+
+    if resp.embeddings.len() != texts.len() {
+        return Err(format!(
+            "Batch embed returned {} vectors for {} inputs",
+            resp.embeddings.len(),
+            texts.len()
+        ));
+    }
+    // Normalize each vector to unit length — see embed() for rationale.
+    let normalized: Vec<Vec<f32>> = resp.embeddings.into_iter().enumerate()
+        .map(|(i, emb)| {
+            let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm < 0.1 {
+                return Err(format!("Degenerate embedding at index {i} (norm={norm:.4})"));
+            }
+            Ok(emb.into_iter().map(|x| x / norm).collect())
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(normalized)
 }
 
 /// Insert or replace all chunks for a note in the vector index.
@@ -314,6 +372,7 @@ pub struct NoteMatch {
     pub note_id: i64,
     pub title: String,
     pub excerpts: Vec<String>,
+    pub distance: f32,
 }
 
 /// A raw search hit including the distance score. Used for debugging threshold calibration.
@@ -334,10 +393,20 @@ const MAX_SOURCE_NOTES: usize = 5;
 /// distance is dropped. This is model-agnostic: it adapts to whatever distance
 /// scale nomic-embed-text produces rather than relying on a magic absolute number.
 ///
-/// 1.40 means: a note is kept only if its distance is within 40% of the best
-/// note's distance. Example — best = 0.50, cutoff = 0.70; a note at 0.68 passes
-/// but a note at 0.72 is dropped.
-const RELATIVE_DISTANCE_FACTOR: f32 = 1.40;
+/// 1.15 means: a note is kept only if its distance is within 15% of the best
+/// note's distance. Example — best = 0.50, cutoff = 0.575; a note at 0.57 passes
+/// but a note at 0.58 is dropped. Tighter than 1.25 to reduce keyword-overlap
+/// noise (e.g. a Transformers note surfacing for a "binary search tree" query).
+const RELATIVE_DISTANCE_FACTOR: f32 = 1.15;
+/// Absolute ceiling on the best note result's distance.
+/// The relative filter alone cannot detect "all results are irrelevant" — it just
+/// picks the least-bad notes. This ceiling cuts the entire result set when nothing
+/// relevant exists, preventing unrelated notes from polluting context.
+/// After L2-normalization: random-noise documents score ~1.4–2.0; genuinely related
+/// content scores <0.8. 0.9 is a tighter cutoff that filters keyword-overlap noise.
+/// NOTE: existing stored note embeddings must be re-indexed (reindex_all) after
+/// the normalization change — stored unnormalized vectors give wrong distances.
+const NOTE_MAX_DISTANCE: f32 = 0.9;
 /// How many raw chunks to retrieve from LanceDB per search.
 /// Must be larger than MAX_SOURCE_NOTES to allow deduplication to work — if a
 /// long note contributes many top-ranked chunks they will all count as one note,
@@ -416,6 +485,10 @@ pub async fn search(
     ranked.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     ranked.truncate(MAX_SOURCE_NOTES);
     if let Some(best_distance) = ranked.first().map(|(_, d, _)| *d) {
+        // Absolute ceiling: if even the best note is too far away, return nothing.
+        if best_distance > NOTE_MAX_DISTANCE {
+            return Ok(vec![]);
+        }
         let cutoff = best_distance * RELATIVE_DISTANCE_FACTOR;
         ranked.retain(|(_, d, _)| *d <= cutoff);
     }
@@ -463,13 +536,14 @@ pub async fn search(
     // Assemble final results in ranked order.
     let results = ranked
         .into_iter()
-        .map(|(note_id, _, title)| {
+        .map(|(note_id, dist, title)| {
             let mut chunks = note_chunks.remove(&note_id).unwrap_or_default();
             chunks.sort_by_key(|(ci, _)| *ci);
             NoteMatch {
                 note_id,
                 title,
                 excerpts: chunks.into_iter().map(|(_, e)| e).collect(),
+                distance: dist,
             }
         })
         .collect();
@@ -533,6 +607,327 @@ pub async fn raw_search(
             };
             results.push(RawMatch {
                 note_id: ids.value(i),
+                title: titles.value(i).to_string(),
+                excerpt,
+                distance: distances.value(i),
+            });
+        }
+    }
+    Ok(results)
+}
+
+// ---------------------------------------------------------------------------
+// Wikipedia vector index
+// ---------------------------------------------------------------------------
+
+const WIKI_TABLE: &str = "wikipedia_index";
+
+fn wikipedia_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        // Stable identifier: "<bundle_id>/<article_path>"
+        Field::new("article_id", DataType::Utf8, false),
+        Field::new("bundle_id",  DataType::Utf8, false),
+        Field::new("title",      DataType::Utf8, false),
+        Field::new("content",    DataType::Utf8, false),
+        Field::new(
+            "vector",
+            DataType::FixedSizeList(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                DIMS,
+            ),
+            false,
+        ),
+    ]))
+}
+
+async fn open_wiki_table(conn: &Connection) -> Result<lancedb::Table, String> {
+    match conn.open_table(WIKI_TABLE).execute().await {
+        Ok(t) => Ok(t),
+        Err(_) => conn
+            .create_empty_table(WIKI_TABLE, wikipedia_schema())
+            .execute()
+            .await
+            .map_err(|e| e.to_string()),
+    }
+}
+
+/// A match returned from a wikipedia semantic search.
+#[derive(Debug, Serialize)]
+pub struct WikiMatch {
+    pub article_id: String,
+    pub bundle_id:  String,
+    pub title:      String,
+    pub excerpts:   Vec<String>,
+    pub distance:   f32,
+}
+
+/// Insert one article chunk into the wikipedia vector index.
+/// Callers are responsible for deduplication (delete by article_id first if re-indexing).
+/// Upsert a single article. Kept for fallback/test use; prefer `wikipedia_upsert_batch`.
+#[allow(dead_code)]
+pub async fn wikipedia_upsert(
+    conn: &Connection,
+    article_id: &str,
+    bundle_id:  &str,
+    title:      &str,
+    content:    &str,
+    embedding:  Vec<f32>,
+) -> Result<(), String> {
+    let table = open_wiki_table(conn).await?;
+
+    // Remove any existing entry for this article (handles re-index case).
+    let safe_id = article_id.replace('\'', "''");
+    table
+        .delete(&format!("article_id = '{safe_id}'"))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let vector_col = FixedSizeListArray::try_new(
+        Arc::new(Field::new("item", DataType::Float32, true)),
+        DIMS,
+        Arc::new(Float32Array::from(embedding)) as ArrayRef,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let schema = wikipedia_schema();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec![article_id])) as ArrayRef,
+            Arc::new(StringArray::from(vec![bundle_id]))  as ArrayRef,
+            Arc::new(StringArray::from(vec![title]))      as ArrayRef,
+            Arc::new(StringArray::from(vec![content]))    as ArrayRef,
+            Arc::new(vector_col) as ArrayRef,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let items: Vec<Result<RecordBatch, ArrowError>> = vec![Ok(batch)];
+    let reader = RecordBatchIterator::new(items, schema);
+    table.add(reader).execute().await.map_err(|e| e.to_string())
+}
+
+/// Upsert a batch of articles in a single delete + insert round-trip.
+///
+/// articles: Vec of (article_id, bundle_id, title, content, embedding)
+///
+/// Compared to calling `wikipedia_upsert` per article this reduces LanceDB
+/// overhead from O(N) opens/deletes/inserts to O(1). On a fast machine this
+/// is the dominant bottleneck once the GPU embedding is batched.
+pub async fn wikipedia_upsert_batch(
+    conn: &Connection,
+    articles: Vec<(String, String, String, String, Vec<f32>)>,
+) -> Result<(), String> {
+    if articles.is_empty() { return Ok(()); }
+    let table = open_wiki_table(conn).await?;
+
+    // One bulk delete covering every article_id in this batch.
+    let ids_quoted: Vec<String> = articles
+        .iter()
+        .map(|(id, _, _, _, _)| format!("'{}'", id.replace('\'', "''")))
+        .collect();
+    table
+        .delete(&format!("article_id IN ({})", ids_quoted.join(",")))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Build one RecordBatch with a row per article.
+    let mut ids      = Vec::with_capacity(articles.len());
+    let mut bundle_ids = Vec::with_capacity(articles.len());
+    let mut titles   = Vec::with_capacity(articles.len());
+    let mut contents = Vec::with_capacity(articles.len());
+    let mut flat_vec: Vec<f32> = Vec::with_capacity(articles.len() * DIMS as usize);
+    for (id, bid, title, content, emb) in articles {
+        ids.push(id);
+        bundle_ids.push(bid);
+        titles.push(title);
+        contents.push(content);
+        flat_vec.extend(emb);
+    }
+    let vector_col = FixedSizeListArray::try_new(
+        Arc::new(Field::new("item", DataType::Float32, true)),
+        DIMS,
+        Arc::new(Float32Array::from(flat_vec)) as ArrayRef,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let schema = wikipedia_schema();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(ids))        as ArrayRef,
+            Arc::new(StringArray::from(bundle_ids)) as ArrayRef,
+            Arc::new(StringArray::from(titles))     as ArrayRef,
+            Arc::new(StringArray::from(contents))   as ArrayRef,
+            Arc::new(vector_col)                    as ArrayRef,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let reader = RecordBatchIterator::new(vec![Ok(batch)], schema);
+    table.add(reader).execute().await.map_err(|e| e.to_string())
+}
+
+/// Remove all entries for a given bundle from the wikipedia vector index.
+/// Called when the user removes a bundle.
+pub async fn wikipedia_remove_bundle(conn: &Connection, bundle_id: &str) -> Result<(), String> {
+    let table = open_wiki_table(conn).await?;
+    let safe_id = bundle_id.replace('\'', "''");
+    table
+        .delete(&format!("bundle_id = '{safe_id}'"))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Absolute ceiling on the best Wikipedia result's distance.
+/// After L2-normalization: a strongly relevant article scores <0.5;
+/// clearly irrelevant articles score >1.4. 1.2 is a safe cutoff.
+const WIKI_MAX_DISTANCE: f32 = 1.2;
+
+/// Relative spread factor: drop any result whose distance is more than this
+/// multiple of the best result's distance. Mirrors RELATIVE_DISTANCE_FACTOR
+/// used for notes. 1.30 is tighter than notes (1.40) because Wikipedia results
+/// are all drawn from the same large corpus, so spread within a good result set
+/// is naturally tighter; a wider spread here means the tail results are noise.
+const WIKI_RELATIVE_DISTANCE_FACTOR: f32 = 1.30;
+
+/// Search the wikipedia vector index.
+/// Returns up to `limit` results ordered by similarity.
+/// Results are filtered: if the best distance exceeds WIKI_MAX_DISTANCE the
+/// function returns an empty list rather than injecting irrelevant articles
+/// as context. Within a qualifying result set, results more than
+/// WIKI_RELATIVE_DISTANCE_FACTOR times the best distance are also dropped.
+pub async fn wikipedia_search(
+    conn: &Connection,
+    query: Vec<f32>,
+    limit: usize,
+) -> Result<Vec<WikiMatch>, String> {
+    let table = open_wiki_table(conn).await?;
+
+    let count = table.count_rows(None).await.map_err(|e| e.to_string())?;
+    if count == 0 {
+        return Ok(vec![]);
+    }
+
+    let stream = table
+        .vector_search(query)
+        .map_err(|e| e.to_string())?
+        .limit(limit)
+        .execute()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let batches: Vec<RecordBatch> = stream.try_collect().await.map_err(|e| e.to_string())?;
+
+    let mut results: Vec<WikiMatch> = Vec::new();
+    for batch in &batches {
+        let article_ids = batch
+            .column_by_name("article_id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or("missing article_id column in wikipedia search results")?;
+        let bundle_ids = batch
+            .column_by_name("bundle_id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or("missing bundle_id column in wikipedia search results")?;
+        let titles = batch
+            .column_by_name("title")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or("missing title column in wikipedia search results")?;
+        let contents = batch
+            .column_by_name("content")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or("missing content column in wikipedia search results")?;
+        let distances = batch
+            .column_by_name("_distance")
+            .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+            .ok_or("missing _distance column in wikipedia search results")?;
+
+        for i in 0..batch.num_rows() {
+            let raw = contents.value(i);
+            let excerpt = if raw.chars().count() > 500 {
+                let cutoff = raw.char_indices().nth(500).map(|(b, _)| b).unwrap_or(raw.len());
+                format!("{}\u{2026}", &raw[..cutoff])
+            } else {
+                raw.to_string()
+            };
+            results.push(WikiMatch {
+                article_id: article_ids.value(i).to_string(),
+                bundle_id:  bundle_ids.value(i).to_string(),
+                title:      titles.value(i).to_string(),
+                excerpts:   vec![excerpt],
+                distance:   distances.value(i),
+            });
+        }
+    }
+
+    if results.is_empty() {
+        return Ok(results);
+    }
+
+    // Drop the whole result set if even the best hit is too far away.
+    // Injecting irrelevant Wikipedia articles is worse than injecting nothing.
+    let best = results.iter().map(|r| r.distance).fold(f32::MAX, f32::min);
+    if best > WIKI_MAX_DISTANCE {
+        return Ok(vec![]);
+    }
+
+    // Drop tail results that are much worse than the best hit.
+    let cutoff = best * WIKI_RELATIVE_DISTANCE_FACTOR;
+    results.retain(|r| r.distance <= cutoff);
+
+    Ok(results)
+}
+
+/// Like wikipedia_search() but returns raw distance scores without any filtering.
+/// Used by the debug panel to calibrate WIKI_MAX_DISTANCE.
+pub async fn raw_wikipedia_search(
+    conn: &Connection,
+    query: Vec<f32>,
+    limit: usize,
+) -> Result<Vec<RawMatch>, String> {
+    let table = open_wiki_table(conn).await?;
+    let count = table.count_rows(None).await.map_err(|e| e.to_string())?;
+    if count == 0 {
+        return Ok(vec![]);
+    }
+
+    let stream = table
+        .vector_search(query)
+        .map_err(|e| e.to_string())?
+        .limit(limit)
+        .execute()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let batches: Vec<RecordBatch> = stream.try_collect().await.map_err(|e| e.to_string())?;
+
+    let mut results = Vec::new();
+    for batch in &batches {
+        let titles = batch
+            .column_by_name("title")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or("missing title column")?;
+        let contents = batch
+            .column_by_name("content")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or("missing content column")?;
+        let distances = batch
+            .column_by_name("_distance")
+            .and_then(|c| c.as_any().downcast_ref::<Float32Array>())
+            .ok_or("missing _distance column")?;
+
+        for i in 0..batch.num_rows() {
+            let raw = contents.value(i);
+            let excerpt = if raw.chars().count() > 200 {
+                let cutoff = raw.char_indices().nth(200).map(|(b, _)| b).unwrap_or(raw.len());
+                format!("{}\u{2026}", &raw[..cutoff])
+            } else {
+                raw.to_string()
+            };
+            results.push(RawMatch {
+                note_id: 0,
                 title: titles.value(i).to_string(),
                 excerpt,
                 distance: distances.value(i),

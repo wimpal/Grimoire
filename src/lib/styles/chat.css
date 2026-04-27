@@ -146,6 +146,42 @@
   color: var(--text-h);
 }
 
+/* Rendered Markdown inside assistant messages */
+.chat-message.assistant .msg-body {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.chat-message.assistant .msg-body pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow-x: auto;
+}
+
+.chat-message.assistant .msg-body code {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.chat-message.assistant .msg-body pre code {
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+}
+
+.chat-message.assistant .msg-body :not(pre) > code {
+  padding: 1px 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
 .chat-message.loading p {
   color: var(--text);
   font-style: italic;
@@ -202,6 +238,12 @@
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 1px 6px;
+}
+
+.chat-source-wiki {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-bg);
 }
 
 .debug-search {
